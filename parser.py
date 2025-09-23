@@ -11,6 +11,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# --- Get Browserless connection details from environment variables ---
+# This is the new way we connect to our browser.
+BROWSERLESS_TOKEN = os.environ.get('BROWSERLESS_TOKEN')
+BROWSERLESS_URL = f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}"
+
+
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
@@ -26,9 +32,9 @@ async def update_parsers_from_github():
     parsers_dir = os.path.join(REPO_DIR, "plugin", "js", "parsers")
     if not os.path.isdir(parsers_dir):
         return 0
-
+        
     parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js')]
-
+    
     parsers_to_save = []
     for filename in parser_files:
         with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
@@ -42,22 +48,28 @@ async def update_parsers_from_github():
     return len(parsers_to_save)
 
 async def fetch_page_content(url: str) -> str:
-    """Fetches the full HTML content of a web page using Playwright."""
+    """
+    Fetches the full HTML content of a web page using a REMOTE browser from Browserless.io.
+    """
+    if not BROWSERLESS_TOKEN:
+        raise ValueError("FATAL: BROWSERLESS_TOKEN environment variable is not set. Cannot connect to remote browser.")
+
     async with async_playwright() as p:
         try:
-            browser = await p.chromium.launch(args=['--no-sandbox', '--disable-setuid-sandbox'])
+            # --- THIS IS THE KEY CHANGE ---
+            # Instead of launching a local browser, we connect to a remote one.
+            browser = await p.chromium.connect_over_cdp(BROWSERLESS_URL, timeout=60000)
+            
         except Exception as e:
-            logger.error(f"Playwright failed to launch browser: {e}")
-            raise RuntimeError(
-                "Could not launch the self-contained Chromium. "
-                f"This may be a deployment environment issue. Original error: {e}"
-            )
-
+            logger.error(f"Playwright failed to CONNECT to remote browser: {e}", exc_info=True)
+            raise RuntimeError(f"Could not connect to the remote browser service. Check your API token and network. Original error: {e}")
+            
         page = await browser.new_page()
         try:
             await page.goto(url, wait_until='networkidle', timeout=60000)
             content = await page.content()
         finally:
+            # We close the browser context, not the entire remote browser instance.
             await browser.close()
         return content
 
@@ -98,11 +110,11 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
                         chapters.append({'title': link.text.strip(), 'url': link['href']})
                 if chapters:
                     break
-
-    if not chapters:
+    
+    if not chapters: 
         links = soup.find_all('a', href=True)
         chapters = [{'title': link.text.strip(), 'url': link['href']} for link in links if re.search(r'chapter|ep\d+|ch\.\d+', link.text.lower()) and link.text.strip()]
-        if not chapters:
+        if not chapters: 
             chapters = [{'title': "Full Page Content", 'url': url}]
 
     for chapter in chapters:
@@ -114,7 +126,7 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
 
 async def create_epub_from_chapters(chapters: list, title: str, settings: dict) -> (str, str):
     """Creates an EPUB from a list of selected chapter dictionaries."""
-
+    
     author = settings.get('author', 'Unknown')
     final_filename = sanitize_filename(title)
 
@@ -125,7 +137,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
     book.add_author(author)
 
     book_spine = ['nav']
-
+    
     for i, chapter_data in enumerate(chapters):
         try:
             logger.info(f"Fetching chapter: {chapter_data['title']}")
@@ -146,7 +158,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
                     img_tag.decompose()
 
             chapter_html = f"<h1>{chapter_data['title']}</h1>{str(content_body)}"
-
+            
             epub_chapter = epub.EpubHtml(title=chapter_data['title'], file_name=f'chap_{i+1}.xhtml', lang='en')
             epub_chapter.content = chapter_html
             book.add_item(epub_chapter)
