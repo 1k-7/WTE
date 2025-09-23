@@ -15,4 +15,4 @@ services:
         value: 3.11.5
       # Tell the build script AND the running app where to store/find the browsers
       - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/project/.playwright
+        value: /opt/render/project/src/.playwright
