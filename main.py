@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # --- Environment variables & Constants ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # The public URL of your Render web service
-PORT = int(os.environ.get('PORT', 8080)) # Render provides this automatically
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
+PORT = int(os.environ.get('PORT', 8080))
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set.")
@@ -38,14 +38,16 @@ TARGET_URL, PARSER_FILE = range(2)
 # --- Command Handlers ---
 
 async def start(update: Update, context: CallbackContext) -> None:
-    """Send a welcome message."""
+    """Send a welcome message with updated instructions."""
     await update.message.reply_text(
         'Welcome to the WebToEpub Bot!\n\n'
-        'Send me a link to convert it into an EPUB.\n'
+        'To convert a webpage, use the /epub command:\n\n'
+        '1. **Single Link:** `/epub https://your-link.com`\n'
+        '2. **Multiple Links:** Send a message with multiple links, then reply to it with `/epub`.\n'
+        '3. **File:** Upload a `.txt` or `.json` file with links, then reply to it with `/epub`.\n\n'
         'Use /settings to configure options.\n'
         'Use /update_parsers to fetch the latest parsers.\n'
-        'Use /add_parser to add a custom parser.\n'
-        'Use /epub to process a list of links from a message or file.'
+        'Use /add_parser to add a custom parser.'
     )
 
 async def settings_command(update: Update, context: CallbackContext) -> None:
@@ -152,19 +154,15 @@ async def process_url_list(update: Update, context: CallbackContext, urls: list)
         text="Batch processing complete."
     )
 
-async def handle_link(update: Update, context: CallbackContext) -> None:
-    """Handle incoming messages containing links for EPUB conversion."""
-    urls = filters.Entity("url").extract_from(update.message)
-    if not urls:
-        await update.message.reply_text("Please send me a valid URL or a list of URLs.")
-        return
-    await process_url_list(update, context, list(urls))
-    
 async def epub_command(update: Update, context: CallbackContext) -> None:
-    """Handles /epub command for batch processing from text or file."""
+    """
+    Handles /epub command. It can process a single URL, reply to a message with URLs,
+    or reply to a file (.txt, .json) with URLs.
+    """
     replied_message = update.message.reply_to_message
     urls = []
 
+    # Case 1: Reply to a document
     if replied_message and replied_message.document:
         doc = replied_message.document
         if doc.file_name.endswith(('.txt', '.json')):
@@ -176,27 +174,44 @@ async def epub_command(update: Update, context: CallbackContext) -> None:
                 if doc.file_name.endswith('.txt'):
                     urls = [line.strip() for line in file_content.splitlines() if line.strip()]
                 elif doc.file_name.endswith('.json'):
-                    urls = json.loads(file_content)
-                    if not isinstance(urls, list): raise ValueError("JSON must be a list of URLs.")
+                    data = json.loads(file_content)
+                    if isinstance(data, list):
+                        urls = [str(url) for url in data]
+                    else:
+                        raise ValueError("JSON must contain a list of URLs.")
             except Exception as e:
                 logger.error(f"Error processing file for /epub: {e}")
                 await update.message.reply_text(f"Could not process the file: {e}")
                 return
         else:
-            await update.message.reply_text("Please reply to a .txt or .json file.")
+            await update.message.reply_text("Invalid file type. Please reply to a .txt or .json file.")
             return
+
+    # Case 2: Reply to a text message or command with arguments
     else:
-        # Check current message for URLs if not a reply
         target_message = replied_message if replied_message else update.message
-        urls = filters.Entity("url").extract_from(target_message)
+        # Extract URLs from entities (handles links even without http/https)
+        if target_message.entities:
+            urls.extend(
+                target_message.text[entity.offset : entity.offset + entity.length]
+                for entity in target_message.entities
+                if entity.type == 'url'
+            )
+        # Fallback to simple regex for plain text links
         if not urls:
-             await update.message.reply_text("Reply to a message with links or a link file with /epub.")
-             return
+             urls.extend(re.findall(r'https?://[^\s]+', target_message.text))
 
     if urls:
-        await process_url_list(update, context, list(urls))
+        # Remove duplicates while preserving order
+        unique_urls = list(dict.fromkeys(urls))
+        await process_url_list(update, context, unique_urls)
     else:
-        await update.message.reply_text("No valid URLs found to process.")
+        await update.message.reply_text(
+            "No URLs found. Use /epub in one of these ways:\n\n"
+            "1. `/epub https://your-link.com`\n"
+            "2. Reply `/epub` to a message containing links.\n"
+            "3. Reply `/epub` to a .txt or .json file of links."
+        )
 
 # --- Callback and Conversation Handlers ---
 
@@ -232,12 +247,11 @@ def main() -> None:
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("update_parsers", update_parsers_command))
     application.add_handler(CommandHandler("epub", epub_command))
-    application.add_handler(MessageHandler(filters.Entity("url") & ~filters.COMMAND, handle_link))
+    # Removed the generic link handler to avoid ambiguity. All processing is now explicit via /epub.
     application.add_handler(CallbackQueryHandler(settings_callback_handler, pattern='^(toggle_|goto_|back_to_)'))
     application.add_handler(set_setting_handler)
 
     # Start the bot via webhook
-    # The URL path is the token, which is a secret way to ensure only Telegram is calling this endpoint.
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
