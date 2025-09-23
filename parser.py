@@ -11,10 +11,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# --- Get Browserless connection details from environment variables ---
-# This is the new way we connect to our browser.
-BROWSERLESS_TOKEN = os.environ.get('BROWSERLESS_TOKEN')
-BROWSERLESS_URL = f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}"
+# --- THE DEFINITIVE PATH ---
+# This points directly to the Google Chrome executable installed by our new build script
+# in Render's persistent cache directory.
+CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
 
 
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
@@ -48,28 +48,27 @@ async def update_parsers_from_github():
     return len(parsers_to_save)
 
 async def fetch_page_content(url: str) -> str:
-    """
-    Fetches the full HTML content of a web page using a REMOTE browser from Browserless.io.
-    """
-    if not BROWSERLESS_TOKEN:
-        raise ValueError("FATAL: BROWSERLESS_TOKEN environment variable is not set. Cannot connect to remote browser.")
+    """Fetches the full HTML content of a web page using the natively installed Google Chrome on Render."""
+    # A crucial check to give a clear error if the build script failed
+    if not os.path.exists(CHROME_EXECUTABLE_PATH):
+        raise FileNotFoundError(f"FATAL: Chrome executable not found at the native path: {CHROME_EXECUTABLE_PATH}. The build script failed. Check the deploy logs.")
 
     async with async_playwright() as p:
         try:
-            # --- THIS IS THE KEY CHANGE ---
-            # Instead of launching a local browser, we connect to a remote one.
-            browser = await p.chromium.connect_over_cdp(BROWSERLESS_URL, timeout=60000)
-            
+            # Launch Chrome using the explicit path and required sandbox arguments
+            browser = await p.chromium.launch(
+                executable_path=CHROME_EXECUTABLE_PATH,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
         except Exception as e:
-            logger.error(f"Playwright failed to CONNECT to remote browser: {e}", exc_info=True)
-            raise RuntimeError(f"Could not connect to the remote browser service. Check your API token and network. Original error: {e}")
+            logger.error(f"Playwright failed to launch browser from the native Render path: {CHROME_EXECUTABLE_PATH}", exc_info=True)
+            raise RuntimeError(f"Could not launch the natively installed Chrome. Original error: {e}")
             
         page = await browser.new_page()
         try:
             await page.goto(url, wait_until='networkidle', timeout=60000)
             content = await page.content()
         finally:
-            # We close the browser context, not the entire remote browser instance.
             await browser.close()
         return content
 
