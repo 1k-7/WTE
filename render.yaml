@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: webtoepub-telegram-bot
+    env: python
+    buildCommand: "./build.sh"
+    startCommand: "python main.py"
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.5
