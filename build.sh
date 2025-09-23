@@ -2,22 +2,14 @@
 # exit on error
 set -o errexit
 
+# Update the package manager and install a system-wide version of Chromium.
+# This is the definitive fix for the browser executable issue.
+echo "Updating apt and installing system-wide Chromium..."
+apt-get update
+apt-get install -y chromium-browser
+
 # Install pip dependencies
+echo "Installing pip requirements..."
 pip install -r requirements.txt
 
-# Set a persistent location inside the source directory for Playwright's browser cache
-export PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.playwright
-
-# Install the browser and its dependencies
-echo "Installing Playwright browsers to $PLAYWRIGHT_BROWSERS_PATH..."
-python -m playwright install --with-deps chromium
-
-# Grant execute permissions to the browser directory. THIS IS A CRITICAL STEP.
-echo "Setting permissions for browser executables..."
-chmod -R 755 $PLAYWRIGHT_BROWSERS_PATH
-
-# (Optional) List the contents to verify in the logs that the files exist and are executable
-echo "Verifying installation..."
-ls -laR $PLAYWRIGHT_BROWSERS_PATH
-
-echo "Build script finished."
+echo "Build script finished successfully."
