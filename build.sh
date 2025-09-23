@@ -16,7 +16,7 @@ python -m playwright install --with-deps chromium
 echo "Setting permissions for browser executables..."
 chmod -R 755 $PLAYWRIGHT_BROWSERS_PATH
 
-# (Optional) List the contents to verify in the logs
+# (Optional) List the contents to verify in the logs that the files exist and are executable
 ls -laR $PLAYWRIGHT_BROWSERS_PATH
 
 echo "Build script finished."
