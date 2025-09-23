@@ -6,9 +6,28 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from database import get_custom_parser, get_repo_parser, save_parsers_from_repo
+from urllib.parse import urljoin
 
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
+PLAYWRIGHT_BROWSERS_PATH = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '/opt/render/project/.playwright')
+
+def find_chromium_executable():
+    """Dynamically finds the Chromium executable installed by Playwright."""
+    if not os.path.exists(PLAYWRIGHT_BROWSERS_PATH):
+        return None
+        
+    for item in os.listdir(PLAYWRIGHT_BROWSERS_PATH):
+        if item.startswith('chromium'):
+            # Path for Render/Linux environments
+            executable = os.path.join(PLAYWRIGHT_BROWSERS_PATH, item, 'chrome-linux', 'chrome')
+            if os.path.exists(executable):
+                return executable
+            # Fallback for alternative naming
+            executable = os.path.join(PLAYWRIGHT_BROWSERS_PATH, item, 'chrome-linux', 'headless_shell')
+            if os.path.exists(executable):
+                return executable
+    return None
 
 async def update_parsers_from_github():
     """Clones or pulls the WebToEpub repository and updates parsers in the database."""
@@ -39,8 +58,12 @@ async def update_parsers_from_github():
 
 async def fetch_page_content(url: str) -> str:
     """Fetches the full HTML content of a web page using Playwright."""
+    executable_path = find_chromium_executable()
+    if not executable_path:
+        raise RuntimeError("Chromium executable not found. Check PLAYWRIGHT_BROWSERS_PATH and build script.")
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch()
+        browser = await p.chromium.launch(executable_path=executable_path)
         page = await browser.new_page()
         try:
             await page.goto(url, wait_until='networkidle', timeout=60000)
@@ -67,13 +90,11 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
     chapters = []
     parser_found = False
 
-    # Check for specific parsers first
     custom_parser = get_custom_parser(user_id, url)
     repo_parser = get_repo_parser(url)
 
     if custom_parser or repo_parser:
         parser_found = True
-        # NOTE: This is a placeholder for JS execution. We simulate by using common selectors.
         toc_selectors = [
             'ul.chapter-list', 'ul.list-chapter', 'div#chapter-list',
             'div.chapter-list', 'div#list dd', 'div.chapter-list-wrapper',
@@ -89,19 +110,16 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
                 if chapters:
                     break
     
-    if not chapters: # Generic fallback
+    if not chapters: 
         links = soup.find_all('a', href=True)
         chapters = [{'title': link.text.strip(), 'url': link['href']} for link in links if re.search(r'chapter|ep\d+|ch\.\d+', link.text.lower()) and link.text.strip()]
-        if not chapters: # Last resort fallback
+        if not chapters: 
             chapters = [{'title': "Full Page Content", 'url': url}]
-
 
     for chapter in chapters:
         chapter['selected'] = True
         if not chapter['url'].startswith('http'):
-             from urllib.parse import urljoin
              chapter['url'] = urljoin(url, chapter['url'])
-
 
     return title, chapters, parser_found
 
@@ -125,7 +143,6 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
             html_content = await fetch_page_content(chapter_data['url'])
             soup = BeautifulSoup(html_content, 'html.parser')
 
-            # More robust content extraction
             content_selectors = ['div#chapter-content', 'div.entry-content', 'div.reading-content', 'div#content', 'article', 'div.post-content']
             content_body = None
             for selector in content_selectors:
