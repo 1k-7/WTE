@@ -13,40 +13,6 @@ logger = logging.getLogger(__name__)
 
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
-# This path is set for both the build and run environments in render.yaml
-PLAYWRIGHT_BROWSERS_PATH = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '/opt/render/project/.playwright')
-
-def find_chromium_executable():
-    """Dynamically finds the Chromium executable with detailed logging."""
-    logger.info(f"Searching for Chromium in PLAYWRIGHT_BROWSERS_PATH: {PLAYWRIGHT_BROWSERS_PATH}")
-    if not os.path.exists(PLAYWRIGHT_BROWSERS_PATH):
-        logger.error(f"Browser path does not exist: {PLAYWRIGHT_BROWSERS_PATH}")
-        return None
-    
-    try:
-        dir_contents = os.listdir(PLAYWRIGHT_BROWSERS_PATH)
-        logger.info(f"Contents of {PLAYWRIGHT_BROWSERS_PATH}: {dir_contents}")
-    except Exception as e:
-        logger.error(f"Could not list directory {PLAYWRIGHT_BROWSERS_PATH}: {e}")
-        return None
-
-    for item in dir_contents:
-        if 'chromium' in item:
-            browser_dir = os.path.join(PLAYWRIGHT_BROWSERS_PATH, item)
-            potential_paths = [
-                os.path.join(browser_dir, 'chrome-linux', 'chrome'),
-                os.path.join(browser_dir, 'chrome-linux', 'headless_shell')
-            ]
-            for path in potential_paths:
-                logger.info(f"Checking for executable at: {path}")
-                if os.path.exists(path) and os.access(path, os.X_OK):
-                    logger.info(f"Found executable and it is runnable: {path}")
-                    return path
-                elif os.path.exists(path):
-                    logger.warning(f"Found file at {path}, but it is NOT executable.")
-
-    logger.error("Completed search. No suitable chromium executable was found.")
-    return None
 
 async def update_parsers_from_github():
     """Clones or pulls the WebToEpub repository and updates parsers in the database."""
@@ -77,12 +43,15 @@ async def update_parsers_from_github():
 
 async def fetch_page_content(url: str) -> str:
     """Fetches the full HTML content of a web page using Playwright."""
-    executable_path = find_chromium_executable()
-    if not executable_path:
-        raise RuntimeError("Chromium executable not found. Check PLAYWRIGHT_BROWSERS_PATH and build script.")
-
+    # Playwright will automatically use the PLAYWRIGHT_BROWSERS_PATH environment variable
+    # This simplifies the code and makes it more robust.
     async with async_playwright() as p:
-        browser = await p.chromium.launch(executable_path=executable_path)
+        try:
+            browser = await p.chromium.launch()
+        except Exception as e:
+            logger.error("Playwright failed to launch browser. This is likely an installation or path issue.")
+            raise e # Re-raise the exception to be caught by the command handler
+            
         page = await browser.new_page()
         try:
             await page.goto(url, wait_until='networkidle', timeout=60000)
