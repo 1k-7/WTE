@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
-# This path is now predictable and self-contained within our project.
+# This path is predictable and self-contained within our project.
 CHROMIUM_EXECUTABLE_PATH = "/opt/render/project/src/bin/chrome-linux/chrome"
 
 async def update_parsers_from_github():
