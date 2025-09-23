@@ -2,7 +2,8 @@ import logging
 import os
 import json
 import asyncio
-from telegram import Update
+import re
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
     CallbackContext, CallbackQueryHandler, ConversationHandler
@@ -12,7 +13,7 @@ from settings import (
     get_user_settings, handle_settings_callback,
     SETTING_VALUE, handle_setting_value_input, get_main_settings_menu
 )
-from parser import create_epub_from_url, update_parsers_from_github
+from parser import get_chapter_list, create_epub_from_chapters, update_parsers_from_github
 from database import add_custom_parser
 
 # --- Enable logging ---
@@ -33,6 +34,7 @@ if not WEBHOOK_URL:
 
 # --- Conversation states ---
 TARGET_URL, PARSER_FILE = range(2)
+CHAPTER_SELECTION = 0
 
 
 # --- Command Handlers ---
@@ -43,8 +45,9 @@ async def start(update: Update, context: CallbackContext) -> None:
         'Welcome to the WebToEpub Bot!\n\n'
         'To convert a webpage, use the /epub command:\n\n'
         '1. **Single Link:** `/epub https://your-link.com`\n'
-        '2. **Multiple Links:** Send a message with multiple links, then reply to it with `/epub`.\n'
-        '3. **File:** Upload a `.txt` or `.json` file with links, then reply to it with `/epub`.\n\n'
+        '2. **Reply to Links:** Send a message with one or more links, then reply to it with `/epub`.\n'
+        '3. **Reply to File:** Upload a `.txt` or `.json` file with links, then reply to it with `/epub`.\n\n'
+        'The bot will fetch the chapter list and let you select which ones to include.\n\n'
         'Use /settings to configure options.\n'
         'Use /update_parsers to fetch the latest parsers.\n'
         'Use /add_parser to add a custom parser.'
@@ -98,132 +101,207 @@ async def received_parser_file(update: Update, context: CallbackContext) -> int:
 
 async def cancel(update: Update, context: CallbackContext) -> int:
     """Cancel any ongoing conversation."""
-    if 'setting_to_edit' in context.user_data:
-        del context.user_data['setting_to_edit']
-    await update.message.reply_text('Operation cancelled.')
+    context.user_data.clear()
+    if update.callback_query:
+        await update.callback_query.edit_message_text('Operation cancelled.')
+    else:
+        await update.message.reply_text('Operation cancelled.')
     return ConversationHandler.END
 
-# --- Link Processing ---
 
-async def process_single_link(update: Update, context: CallbackContext, url: str) -> None:
-    """Processes a single URL and sends the EPUB."""
+# --- Chapter Selection and EPUB Creation ---
+
+async def build_chapter_selection_keyboard(chapters, page=0, page_size=10):
+    keyboard = []
+    start_index = page * page_size
+    end_index = start_index + page_size
+    
+    for i, chapter in enumerate(chapters[start_index:end_index]):
+        status_emoji = "✅" if chapter.get('selected', True) else "❌"
+        keyboard.append([InlineKeyboardButton(f"{status_emoji} {chapter['title']}", callback_data=f"toggle_chapter_{start_index + i}")])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"page_{page-1}"))
+    if end_index < len(chapters):
+        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"page_{page+1}"))
+    
+    if nav_row:
+        keyboard.append(nav_row)
+
+    keyboard.append([
+        InlineKeyboardButton("Select All", callback_data="select_all"),
+        InlineKeyboardButton("Deselect All", callback_data="deselect_all")
+    ])
+    keyboard.append([InlineKeyboardButton("Done ✅", callback_data="done_selecting")])
+
+    return InlineKeyboardMarkup(keyboard)
+
+async def display_chapter_selection(update: Update, context: CallbackContext, message_text: str):
+    chapters = context.user_data['chapters']
+    page = context.user_data.get('page', 0)
+    
+    reply_markup = await build_chapter_selection_keyboard(chapters, page)
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text=message_text, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text=message_text, reply_markup=reply_markup)
+
+async def chapter_selection_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    
+    action, _, data = query.data.partition('_')
+    chapters = context.user_data.get('chapters', [])
+    page = context.user_data.get('page', 0)
+
+    if action == 'toggle':
+        chapter_index = int(data)
+        chapters[chapter_index]['selected'] = not chapters[chapter_index].get('selected', True)
+        await display_chapter_selection(update, context, f"Select chapters for: {context.user_data['title']}")
+
+    elif action == 'page':
+        context.user_data['page'] = int(data)
+        await display_chapter_selection(update, context, f"Select chapters for: {context.user_data['title']}")
+
+    elif action == 'select':
+        select_all = (data == 'all')
+        for chapter in chapters:
+            chapter['selected'] = select_all
+        await display_chapter_selection(update, context, f"Select chapters for: {context.user_data['title']}")
+
+    elif action == 'done':
+        await query.edit_message_text("Processing selected chapters...")
+        selected_chapters = [ch for ch in chapters if ch.get('selected', True)]
+        
+        if not selected_chapters:
+            await query.message.reply_text("No chapters were selected. Operation cancelled.")
+            return ConversationHandler.END
+
+        await process_chapters_to_epub(update, context, selected_chapters)
+        return ConversationHandler.END
+
+async def process_chapters_to_epub(update: Update, context: CallbackContext, chapters: list):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
+    title = context.user_data.get('title', 'Untitled')
     
-    processing_message = await context.bot.send_message(chat_id, f"Processing: {url}")
-    
+    await context.bot.send_message(chat_id, f"Creating EPUB for '{title}' with {len(chapters)} chapter(s)...")
+
     try:
         user_settings = get_user_settings(user_id)
-        epub_path, title = await create_epub_from_url(url, user_settings, user_id)
+        epub_path, final_filename = await create_epub_from_chapters(chapters, title, user_settings)
 
         if epub_path and os.path.exists(epub_path):
             with open(epub_path, 'rb') as epub_file:
                 await context.bot.send_document(
                     chat_id=chat_id,
                     document=epub_file,
-                    filename=f"{title}.epub",
-                    caption=f"Successfully created EPUB for: {url}"
+                    filename=f"{final_filename}.epub",
+                    caption=f"Successfully created EPUB for: {title}"
                 )
             os.remove(epub_path)
         else:
-            await context.bot.send_message(chat_id, f"Failed to create EPUB for: {url}\nThe site may not be supported or the content is protected.")
+            await context.bot.send_message(chat_id, f"Failed to create EPUB for: {title}")
     except Exception as e:
-        logger.error(f"Error processing link {url}: {e}", exc_info=True)
-        await context.bot.send_message(chat_id, f"An error occurred while processing: {url}")
-    finally:
-        await processing_message.delete()
+        logger.error(f"Error creating EPUB from chapters for {title}: {e}", exc_info=True)
+        await context.bot.send_message(chat_id, f"An error occurred while creating the EPUB for: {title}")
 
-async def process_url_list(update: Update, context: CallbackContext, urls: list) -> None:
-    """Iterates through a list of URLs and processes them one by one."""
-    total_urls = len(urls)
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"Starting batch process for {total_urls} URL(s). This may take some time."
-    )
 
-    for i, url in enumerate(urls):
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"Processing {i+1}/{total_urls}: {url}"
-        )
-        await process_single_link(update, context, url)
-        await asyncio.sleep(2)  # Small delay between processing
-    
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Batch processing complete."
-    )
-
-async def epub_command(update: Update, context: CallbackContext) -> None:
+async def epub_command(update: Update, context: CallbackContext) -> int:
     """
-    Handles /epub command. It can process a single URL, reply to a message with URLs,
-    or reply to a file (.txt, .json) with URLs.
+    Entry point for the EPUB creation process.
     """
+    url = ""
     replied_message = update.message.reply_to_message
-    urls = []
 
-    # Case 1: Reply to a document
-    if replied_message and replied_message.document:
-        doc = replied_message.document
-        if doc.file_name.endswith(('.txt', '.json')):
-            try:
-                file = await context.bot.get_file(doc.file_id)
-                file_content_bytes = await file.download_as_bytearray()
-                file_content = file_content_bytes.decode('utf-8')
-
-                if doc.file_name.endswith('.txt'):
-                    urls = [line.strip() for line in file_content.splitlines() if line.strip()]
-                elif doc.file_name.endswith('.json'):
-                    data = json.loads(file_content)
-                    if isinstance(data, list):
-                        urls = [str(url) for url in data]
-                    else:
-                        raise ValueError("JSON must contain a list of URLs.")
-            except Exception as e:
-                logger.error(f"Error processing file for /epub: {e}")
-                await update.message.reply_text(f"Could not process the file: {e}")
-                return
+    # Extract a single URL from command arguments or a replied message
+    if context.args:
+        url = context.args[0]
+    elif replied_message:
+        urls = filters.Entity("url").extract_from(replied_message)
+        if urls:
+            url = list(urls)[0]  # Process only the first URL for chapter selection
         else:
-            await update.message.reply_text("Invalid file type. Please reply to a .txt or .json file.")
-            return
+            await update.message.reply_text("The replied message doesn't contain a valid URL.")
+            return ConversationHandler.END
+    
+    if not url:
+        await update.message.reply_text("Please provide a URL. Usage: `/epub <URL>` or reply to a message with a link.")
+        return ConversationHandler.END
 
-    # Case 2: Reply to a text message or command with arguments
-    else:
-        target_message = replied_message if replied_message else update.message
-        # Extract URLs from entities (handles links even without http/https)
-        if target_message.entities:
-            urls.extend(
-                target_message.text[entity.offset : entity.offset + entity.length]
-                for entity in target_message.entities
-                if entity.type == 'url'
+    await update.message.reply_text(f"Fetching table of contents from: {url}")
+    
+    try:
+        title, chapters, parser_found = await get_chapter_list(url, context.effective_user.id)
+        
+        if not chapters:
+            raise ValueError("No chapters found. The page might be a single article or unsupported.")
+
+        context.user_data['chapters'] = chapters
+        context.user_data['title'] = title
+        context.user_data['page'] = 0
+
+        # If it's a single page/chapter, just process it directly
+        if len(chapters) == 1:
+            await update.message.reply_text("Single chapter/page detected. Processing directly...")
+            await process_chapters_to_epub(update, context, chapters)
+            return ConversationHandler.END
+        
+        # If no specific parser was found, ask the user
+        if not parser_found:
+            keyboard = [[
+                InlineKeyboardButton("Yes, proceed", callback_data="default_parser_yes"),
+                InlineKeyboardButton("No, cancel", callback_data="default_parser_no"),
+            ]]
+            await update.message.reply_text(
+                "No specific parser was found for this site. "
+                "Proceed with a generic conversion? Results may vary.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
-        # Fallback to simple regex for plain text links
-        if not urls:
-             urls.extend(re.findall(r'https?://[^\s]+', target_message.text))
+            return CHAPTER_SELECTION
+        
+        # If parser was found and there are multiple chapters, show selection
+        await display_chapter_selection(update, context, f"Found {len(chapters)} chapters for '{title}'. Please select which to include:")
+        return CHAPTER_SELECTION
 
-    if urls:
-        # Remove duplicates while preserving order
-        unique_urls = list(dict.fromkeys(urls))
-        await process_url_list(update, context, unique_urls)
-    else:
-        await update.message.reply_text(
-            "No URLs found. Use /epub in one of these ways:\n\n"
-            "1. `/epub https://your-link.com`\n"
-            "2. Reply `/epub` to a message containing links.\n"
-            "3. Reply `/epub` to a .txt or .json file of links."
-        )
+    except Exception as e:
+        logger.error(f"Failed to get chapter list for {url}: {e}", exc_info=True)
+        await update.message.reply_text(f"Could not fetch chapter list. The site might be unsupported or down. Error: {e}")
+        return ConversationHandler.END
 
-# --- Callback and Conversation Handlers ---
-
-async def settings_callback_handler(update: Update, context: CallbackContext) -> None:
-    """Handle all button presses in settings menus."""
+async def handle_default_parser_choice(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     await query.answer()
-    return await handle_settings_callback(query, context)
+
+    if query.data == 'default_parser_yes':
+        chapters = context.user_data['chapters']
+        title = context.user_data['title']
+        await display_chapter_selection(update, context, f"Proceeding with generic conversion. Found {len(chapters)} chapters for '{title}'. Please select which to include:")
+        return CHAPTER_SELECTION
+    else:
+        await query.edit_message_text("Operation cancelled.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+# --- Main Application Setup ---
 
 def main() -> None:
     """Start the bot using webhooks for deployment as a web service."""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    epub_conversation_handler = ConversationHandler(
+        entry_points=[CommandHandler('epub', epub_command)],
+        states={
+            CHAPTER_SELECTION: [
+                CallbackQueryHandler(chapter_selection_callback, pattern='^(toggle_chapter_|page_|select_|done_selecting)'),
+                CallbackQueryHandler(handle_default_parser_choice, pattern='^default_parser_')
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+        conversation_timeout=600 # 10 minutes
+    )
 
     add_parser_handler = ConversationHandler(
         entry_points=[CommandHandler('add_parser', add_parser_start)],
@@ -235,23 +313,20 @@ def main() -> None:
     )
 
     set_setting_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(settings_callback_handler, pattern='^set_')],
+        entry_points=[CallbackQueryHandler(handle_settings_callback, pattern='^set_')],
         states={SETTING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_setting_value_input)]},
         fallbacks=[CommandHandler('cancel', cancel)],
         map_to_parent={ConversationHandler.END: ConversationHandler.END}
     )
     
-    # Add all handlers
-    application.add_handler(add_parser_handler)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("update_parsers", update_parsers_command))
-    application.add_handler(CommandHandler("epub", epub_command))
-    # Removed the generic link handler to avoid ambiguity. All processing is now explicit via /epub.
-    application.add_handler(CallbackQueryHandler(settings_callback_handler, pattern='^(toggle_|goto_|back_to_)'))
+    application.add_handler(add_parser_handler)
+    application.add_handler(epub_conversation_handler)
+    application.add_handler(CallbackQueryHandler(handle_settings_callback, pattern='^(toggle_|goto_|back_to_)'))
     application.add_handler(set_setting_handler)
 
-    # Start the bot via webhook
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
