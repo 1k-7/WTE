@@ -2,6 +2,6 @@
 # exit on error
 set -o errexit
 
+echo "--- Installing Python dependencies only ---"
 pip install -r requirements.txt
-
-playwright install --with-deps chromium
+echo "--- Build complete ---"
