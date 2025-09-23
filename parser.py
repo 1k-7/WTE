@@ -30,11 +30,9 @@ async def update_parsers_from_github():
         with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
             content = f.read()
             # This regex finds the domain registration in the parser files
-            domains = re.findall(r"\.register\(\s*\[?([^\]]*)\]?,\s*new", content)
-            if domains:
-                 domain_list = re.findall(r'"(.*?)"', domains[0])
-                 for domain in domain_list:
-                    parsers_to_save.append({"domain": domain.strip(), "script": content})
+            domains = re.findall(r"parserFactory\.register\(\s*\"(.*?)\"", content)
+            for domain in domains:
+                parsers_to_save.append({"domain": domain, "script": content})
 
     if parsers_to_save:
         save_parsers_from_repo(parsers_to_save)
