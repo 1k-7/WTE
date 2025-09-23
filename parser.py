@@ -7,26 +7,45 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from database import get_custom_parser, get_repo_parser, save_parsers_from_repo
 from urllib.parse import urljoin
+import logging
+
+logger = logging.getLogger(__name__)
 
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
+# This path is set for both the build and run environments in render.yaml
 PLAYWRIGHT_BROWSERS_PATH = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '/opt/render/project/.playwright')
 
 def find_chromium_executable():
-    """Dynamically finds the Chromium executable installed by Playwright."""
+    """Dynamically finds the Chromium executable with detailed logging."""
+    logger.info(f"Searching for Chromium in PLAYWRIGHT_BROWSERS_PATH: {PLAYWRIGHT_BROWSERS_PATH}")
     if not os.path.exists(PLAYWRIGHT_BROWSERS_PATH):
+        logger.error(f"Browser path does not exist: {PLAYWRIGHT_BROWSERS_PATH}")
         return None
-        
-    for item in os.listdir(PLAYWRIGHT_BROWSERS_PATH):
-        if item.startswith('chromium'):
-            # Path for Render/Linux environments
-            executable = os.path.join(PLAYWRIGHT_BROWSERS_PATH, item, 'chrome-linux', 'chrome')
-            if os.path.exists(executable):
-                return executable
-            # Fallback for alternative naming
-            executable = os.path.join(PLAYWRIGHT_BROWSERS_PATH, item, 'chrome-linux', 'headless_shell')
-            if os.path.exists(executable):
-                return executable
+    
+    try:
+        dir_contents = os.listdir(PLAYWRIGHT_BROWSERS_PATH)
+        logger.info(f"Contents of {PLAYWRIGHT_BROWSERS_PATH}: {dir_contents}")
+    except Exception as e:
+        logger.error(f"Could not list directory {PLAYWRIGHT_BROWSERS_PATH}: {e}")
+        return None
+
+    for item in dir_contents:
+        if 'chromium' in item:
+            browser_dir = os.path.join(PLAYWRIGHT_BROWSERS_PATH, item)
+            potential_paths = [
+                os.path.join(browser_dir, 'chrome-linux', 'chrome'),
+                os.path.join(browser_dir, 'chrome-linux', 'headless_shell')
+            ]
+            for path in potential_paths:
+                logger.info(f"Checking for executable at: {path}")
+                if os.path.exists(path) and os.access(path, os.X_OK):
+                    logger.info(f"Found executable and it is runnable: {path}")
+                    return path
+                elif os.path.exists(path):
+                    logger.warning(f"Found file at {path}, but it is NOT executable.")
+
+    logger.error("Completed search. No suitable chromium executable was found.")
     return None
 
 async def update_parsers_from_github():
@@ -139,7 +158,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
     
     for i, chapter_data in enumerate(chapters):
         try:
-            print(f"Fetching chapter: {chapter_data['title']}")
+            logger.info(f"Fetching chapter: {chapter_data['title']}")
             html_content = await fetch_page_content(chapter_data['url'])
             soup = BeautifulSoup(html_content, 'html.parser')
 
@@ -164,7 +183,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
             book_spine.append(epub_chapter)
 
         except Exception as e:
-            print(f"Failed to fetch or process chapter '{chapter_data['title']}': {e}")
+            logger.error(f"Failed to fetch or process chapter '{chapter_data['title']}': {e}")
             continue
 
     book.spine = book_spine
