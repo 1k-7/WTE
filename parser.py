@@ -71,48 +71,51 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
     custom_parser = get_custom_parser(user_id, url)
     repo_parser = get_repo_parser(url)
 
-    # Note: JS execution is not implemented here. This is a best-effort scrape based on common patterns.
-    # A full implementation would use a library like `js2py` or a Node.js subprocess.
     if custom_parser or repo_parser:
         parser_found = True
-        # Common selectors for chapter lists on sites supported by WebToEpub
+        # NOTE: This is a placeholder for JS execution. We simulate by using common selectors.
         toc_selectors = [
             'ul.chapter-list', 'ul.list-chapter', 'div#chapter-list',
-            'div.chapter-list', 'div#list dd', 'div.chapter-list-wrapper'
+            'div.chapter-list', 'div#list dd', 'div.chapter-list-wrapper',
+            '.chapter-list a', '.entry-content a', '.post-content a',
         ]
         for selector in toc_selectors:
             toc_element = soup.select_one(selector)
             if toc_element:
                 links = toc_element.find_all('a', href=True)
                 for link in links:
-                    chapters.append({'title': link.text.strip(), 'url': link['href']})
+                    if link.text.strip():
+                        chapters.append({'title': link.text.strip(), 'url': link['href']})
                 if chapters:
                     break
     
-    # Generic fallback if no specific parser is found or if the specific parser fails to find a ToC
-    if not chapters:
+    if not chapters: # Generic fallback
         links = soup.find_all('a', href=True)
-        chapters = [{'title': link.text.strip(), 'url': link['href']} for link in links if re.search(r'chapter|ep\d+', link.text.lower())]
+        chapters = [{'title': link.text.strip(), 'url': link['href']} for link in links if re.search(r'chapter|ep\d+|ch\.\d+', link.text.lower()) and link.text.strip()]
+        if not chapters: # Last resort fallback
+            chapters = [{'title': "Full Page Content", 'url': url}]
 
-    # Clean up and format chapters
+
     for chapter in chapters:
         chapter['selected'] = True
         if not chapter['url'].startswith('http'):
-            chapter['url'] = os.path.join(os.path.dirname(url), chapter['url'])
+             from urllib.parse import urljoin
+             chapter['url'] = urljoin(url, chapter['url'])
+
 
     return title, chapters, parser_found
 
 async def create_epub_from_chapters(chapters: list, title: str, settings: dict) -> (str, str):
     """Creates an EPUB from a list of selected chapter dictionaries."""
     
-    author_tag = settings.get('author', 'Unknown') # Placeholder, should be extracted with title
-    final_filename = sanitize_filename(title) # Simplified for now
+    author = settings.get('author', 'Unknown')
+    final_filename = sanitize_filename(title)
 
     book = epub.EpubBook()
     book.set_identifier('id' + title)
     book.set_title(title)
     book.set_language('en')
-    book.add_author(author_tag)
+    book.add_author(author)
 
     book_spine = ['nav']
     
@@ -122,8 +125,16 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
             html_content = await fetch_page_content(chapter_data['url'])
             soup = BeautifulSoup(html_content, 'html.parser')
 
-            # Basic content extraction (can be improved with parser logic)
-            content_body = soup.find('body')
+            # More robust content extraction
+            content_selectors = ['div#chapter-content', 'div.entry-content', 'div.reading-content', 'div#content', 'article', 'div.post-content']
+            content_body = None
+            for selector in content_selectors:
+                content_body = soup.select_one(selector)
+                if content_body:
+                    break
+            if not content_body:
+                content_body = soup.find('body')
+
             if settings.get('skipImages'):
                  for img_tag in content_body.find_all('img'):
                     img_tag.decompose()
