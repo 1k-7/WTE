@@ -1,5 +1,5 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ConversationHandler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ConversationHandler, CallbackContext
 from database import get_user_settings as db_get_settings, set_user_setting as db_set_setting, get_parser_count
 
 # --- Setting Definitions ---
