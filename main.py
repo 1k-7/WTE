@@ -7,6 +7,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
     CallbackContext, CallbackQueryHandler, ConversationHandler
 )
+
 from settings import (
     get_user_settings, handle_settings_callback,
     SETTING_VALUE, handle_setting_value_input, get_main_settings_menu
@@ -14,18 +15,23 @@ from settings import (
 from parser import create_epub_from_url, update_parsers_from_github
 from database import add_custom_parser
 
-# Enable logging
+# --- Enable logging ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- Environment variables ---
+# --- Environment variables & Constants ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("No TELEGRAM_BOT_TOKEN found in environment variables. Please set it.")
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL')  # The public URL of your Render web service
+PORT = int(os.environ.get('PORT', 8080)) # Render provides this automatically
 
-# --- Conversation states for adding a parser/setting ---
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set.")
+if not WEBHOOK_URL:
+    raise ValueError("WEBHOOK_URL environment variable is not set. This is required for webhook mode.")
+
+# --- Conversation states ---
 TARGET_URL, PARSER_FILE = range(2)
 
 
@@ -201,7 +207,7 @@ async def settings_callback_handler(update: Update, context: CallbackContext) ->
     return await handle_settings_callback(query, context)
 
 def main() -> None:
-    """Start the bot."""
+    """Start the bot using webhooks for deployment as a web service."""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     add_parser_handler = ConversationHandler(
@@ -219,7 +225,8 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel)],
         map_to_parent={ConversationHandler.END: ConversationHandler.END}
     )
-
+    
+    # Add all handlers
     application.add_handler(add_parser_handler)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
@@ -229,7 +236,14 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(settings_callback_handler, pattern='^(toggle_|goto_|back_to_)'))
     application.add_handler(set_setting_handler)
 
-    application.run_polling()
+    # Start the bot via webhook
+    # The URL path is the token, which is a secret way to ensure only Telegram is calling this endpoint.
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+    )
 
 if __name__ == '__main__':
     main()
