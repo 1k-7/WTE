@@ -234,7 +234,7 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text(f"Fetching table of contents from: {url}")
     
     try:
-        title, chapters, parser_found = await get_chapter_list(url, context.effective_user.id)
+        title, chapters, parser_found = await get_chapter_list(url, update.effective_user.id)
         
         if not chapters:
             raise ValueError("No chapters found. The page might be a single article or unsupported.")
