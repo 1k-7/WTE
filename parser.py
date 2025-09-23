@@ -14,9 +14,6 @@ logger = logging.getLogger(__name__)
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
-# This path is predictable and self-contained within our project.
-CHROMIUM_EXECUTABLE_PATH = "/opt/render/project/src/bin/chrome-linux/chrome"
-
 async def update_parsers_from_github():
     """Clones or pulls the WebToEpub repository and updates parsers in the database."""
     if os.path.exists(REPO_DIR):
@@ -29,9 +26,9 @@ async def update_parsers_from_github():
     parsers_dir = os.path.join(REPO_DIR, "plugin", "js", "parsers")
     if not os.path.isdir(parsers_dir):
         return 0
-        
+
     parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js')]
-    
+
     parsers_to_save = []
     for filename in parser_files:
         with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
@@ -46,20 +43,16 @@ async def update_parsers_from_github():
 
 async def fetch_page_content(url: str) -> str:
     """Fetches the full HTML content of a web page using Playwright."""
-    if not os.path.exists(CHROMIUM_EXECUTABLE_PATH):
-        raise RuntimeError(f"FATAL: Chromium executable not found at the hardcoded path: {CHROMIUM_EXECUTABLE_PATH}. The build script likely failed.")
-
     async with async_playwright() as p:
         try:
-            # Explicitly tell Playwright where to find our self-contained executable
-            browser = await p.chromium.launch(executable_path=CHROMIUM_EXECUTABLE_PATH)
+            browser = await p.chromium.launch(args=['--no-sandbox', '--disable-setuid-sandbox'])
         except Exception as e:
-            logger.error(f"Playwright failed to launch browser from path: {CHROMIUM_EXECUTABLE_PATH}")
+            logger.error(f"Playwright failed to launch browser: {e}")
             raise RuntimeError(
                 "Could not launch the self-contained Chromium. "
                 f"This may be a deployment environment issue. Original error: {e}"
             )
-            
+
         page = await browser.new_page()
         try:
             await page.goto(url, wait_until='networkidle', timeout=60000)
@@ -105,11 +98,11 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
                         chapters.append({'title': link.text.strip(), 'url': link['href']})
                 if chapters:
                     break
-    
-    if not chapters: 
+
+    if not chapters:
         links = soup.find_all('a', href=True)
         chapters = [{'title': link.text.strip(), 'url': link['href']} for link in links if re.search(r'chapter|ep\d+|ch\.\d+', link.text.lower()) and link.text.strip()]
-        if not chapters: 
+        if not chapters:
             chapters = [{'title': "Full Page Content", 'url': url}]
 
     for chapter in chapters:
@@ -121,7 +114,7 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
 
 async def create_epub_from_chapters(chapters: list, title: str, settings: dict) -> (str, str):
     """Creates an EPUB from a list of selected chapter dictionaries."""
-    
+
     author = settings.get('author', 'Unknown')
     final_filename = sanitize_filename(title)
 
@@ -132,7 +125,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
     book.add_author(author)
 
     book_spine = ['nav']
-    
+
     for i, chapter_data in enumerate(chapters):
         try:
             logger.info(f"Fetching chapter: {chapter_data['title']}")
@@ -153,7 +146,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
                     img_tag.decompose()
 
             chapter_html = f"<h1>{chapter_data['title']}</h1>{str(content_body)}"
-            
+
             epub_chapter = epub.EpubHtml(title=chapter_data['title'], file_name=f'chap_{i+1}.xhtml', lang='en')
             epub_chapter.content = chapter_html
             book.add_item(epub_chapter)
