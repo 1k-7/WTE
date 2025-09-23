@@ -214,7 +214,7 @@ def main() -> None:
         entry_points=[CommandHandler('add_parser', add_parser_start)],
         states={
             TARGET_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_target_url)],
-            PARSER_FILE: [MessageHandler(filters.Document.JS, received_parser_file)],
+            PARSER_FILE: [MessageHandler(filters.Document.FileExtension("js"), received_parser_file)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
