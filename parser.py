@@ -13,8 +13,9 @@ logger = logging.getLogger(__name__)
 
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
-# This is the standard, predictable path for Chromium installed via apt-get on Debian/Ubuntu (which Render uses)
-CHROMIUM_EXECUTABLE_PATH = "/usr/bin/chromium-browser"
+
+# This path is now predictable and self-contained within our project.
+CHROMIUM_EXECUTABLE_PATH = "/opt/render/project/src/bin/chrome-linux/chrome"
 
 async def update_parsers_from_github():
     """Clones or pulls the WebToEpub repository and updates parsers in the database."""
@@ -45,14 +46,17 @@ async def update_parsers_from_github():
 
 async def fetch_page_content(url: str) -> str:
     """Fetches the full HTML content of a web page using Playwright."""
+    if not os.path.exists(CHROMIUM_EXECUTABLE_PATH):
+        raise RuntimeError(f"FATAL: Chromium executable not found at the hardcoded path: {CHROMIUM_EXECUTABLE_PATH}. The build script likely failed.")
+
     async with async_playwright() as p:
         try:
-            # Explicitly tell Playwright where to find the system-installed executable
+            # Explicitly tell Playwright where to find our self-contained executable
             browser = await p.chromium.launch(executable_path=CHROMIUM_EXECUTABLE_PATH)
         except Exception as e:
             logger.error(f"Playwright failed to launch browser from path: {CHROMIUM_EXECUTABLE_PATH}")
             raise RuntimeError(
-                "Could not launch system-installed Chromium. "
+                "Could not launch the self-contained Chromium. "
                 f"This may be a deployment environment issue. Original error: {e}"
             )
             
