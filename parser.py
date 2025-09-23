@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
-# This path is set for both the build and run environments in render.yaml
 PLAYWRIGHT_BROWSERS_PATH = os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '/opt/render/project/src/.playwright')
 
 def find_chromium_executable():
