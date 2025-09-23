@@ -2,7 +2,7 @@ services:
   - type: web
     name: webtoepub-telegram-bot
     env: python
-    buildCommand: "./build.sh"
+    buildCommand: "chmod +x build.sh && ./build.sh"
     startCommand: "python main.py"
     envVars:
       - key: TELEGRAM_BOT_TOKEN
@@ -13,5 +13,3 @@ services:
         sync: false
       - key: PYTHON_VERSION
         value: 3.11.5
-      - key: BROWSERLESS_TOKEN # Add this new variable
-        sync: false
