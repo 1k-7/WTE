@@ -13,6 +13,6 @@ services:
         sync: false
       - key: PYTHON_VERSION
         value: 3.11.5
-      # Tell the running app where to find the browsers installed during the build
+      # Tell the build script AND the running app where to store/find the browsers
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: /opt/render/project/.playwright
