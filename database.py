@@ -31,14 +31,25 @@ def set_user_setting(user_id, key, value):
     )
 
 # --- Parser Functions ---
-def save_parsers_from_repo(parsers_data):
-    """Saves a list of parsers and their registered domains to the database."""
+def save_parsers_from_repo(parsers_data, clean_first=False):
+    """
+    Saves a list of parsers to the database.
+    Can optionally clean the collection before inserting.
+    """
     if not parsers_data:
-        return
-    # Use a bulk write operation for efficiency
-    repo_parsers_collection.delete_many({})
-    repo_parsers_collection.insert_many(parsers_data)
-
+        return 0
+    if clean_first:
+        repo_parsers_collection.delete_many({})
+    
+    # Use update_one with upsert to prevent duplicates if a parser is re-scanned
+    from pymongo import UpdateOne
+    operations = [
+        UpdateOne({'filename': p['filename']}, {'$set': p}, upsert=True)
+        for p in parsers_data
+    ]
+    result = repo_parsers_collection.bulk_write(operations)
+    return result.upserted_count + result.modified_count
+    
 def get_parser_count():
     """Returns the number of parsers loaded from the repository."""
     return repo_parsers_collection.count_documents({})
