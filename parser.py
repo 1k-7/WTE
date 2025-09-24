@@ -78,8 +78,16 @@ def _load_dependency_scripts(as_dict=False):
     return scripts
 
 
-async def update_parsers_from_github(sent_message, limit=None):
+async def update_parsers_from_github(sent_message=None, limit=None):
     total_saved_count = 0
+
+    async def _log(message):
+        """Logs progress to console or edits a Telegram message."""
+        if sent_message:
+            await sent_message.edit_text(message)
+        else:
+            logger.info(f"Parser Update Status: {message}")
+
     try:
         def git_operations():
             if os.path.exists(REPO_DIR):
@@ -87,7 +95,7 @@ async def update_parsers_from_github(sent_message, limit=None):
             else:
                 git.Repo.clone_from(REPO_URL, REPO_DIR)
         
-        await sent_message.edit_text("Updating parsers... (Accessing repository)")
+        await _log("Updating parsers... (Accessing repository)")
         await asyncio.to_thread(git_operations)
         
         js_dir = os.path.join(REPO_DIR, "plugin", "js")
@@ -106,7 +114,7 @@ async def update_parsers_from_github(sent_message, limit=None):
             batch = parser_files[i:i + BATCH_SIZE]
             batch_to_save = []
             
-            await sent_message.edit_text(f"Updating parsers... (Processing batch {i//BATCH_SIZE + 1}/{(total_files + BATCH_SIZE - 1)//BATCH_SIZE})")
+            await _log(f"Updating parsers... (Processing batch {i//BATCH_SIZE + 1}/{(total_files + BATCH_SIZE - 1)//BATCH_SIZE})")
             
             async with async_playwright() as p:
                 browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
@@ -145,17 +153,17 @@ async def update_parsers_from_github(sent_message, limit=None):
             if batch_to_save:
                 saved_in_batch = save_parsers_from_repo(batch_to_save)
                 total_saved_count += saved_in_batch
-                await sent_message.edit_text(f"Updating parsers... (Saved {total_saved_count}/{total_files} parsers so far)")
+                await _log(f"Updating parsers... (Saved {total_saved_count}/{total_files} parsers so far)")
                 if i == 0 and saved_in_batch == 0:
-                     await sent_message.edit_text("❌ First batch failed to save any parsers. The update process is flawed. Please check logs.")
+                     await _log("❌ First batch failed to save any parsers. The update process is flawed. Please check logs.")
                      return
             await asyncio.sleep(1)
 
-        await sent_message.edit_text(f"✅ Parser update complete. Successfully saved {total_saved_count}/{total_files} parsers.")
+        await _log(f"✅ Parser update complete. Successfully saved {total_saved_count}/{total_files} parsers.")
             
     except Exception as e:
         logger.error("A critical error occurred during parser update:", exc_info=True)
-        await sent_message.edit_text(f"❌ Parser update failed with a critical error: {e}")
+        await _log(f"❌ Parser update failed with a critical error: {e}")
 
 
 async def get_chapter_list(url: str, user_id: int):
