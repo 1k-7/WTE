@@ -52,7 +52,7 @@ def _load_dependency_scripts(as_dict=False):
 
     # Define files and their correct base directories
     dependency_map = {
-        "../_locales/en/messages.json": plugin_dir,
+        "_locales/en/messages.json": plugin_dir,
         "polyfillChrome.js": unittest_dir,
         "EpubItem.js": js_dir, "DebugUtil.js": js_dir, "HttpClient.js": js_dir,
         "ImageCollector.js": js_dir, "Imgur.js": js_dir, "Parser.js": js_dir,
@@ -61,9 +61,8 @@ def _load_dependency_scripts(as_dict=False):
 
     scripts = {} if as_dict else []
     for file, base_dir in dependency_map.items():
-        # Construct the path safely, handling the '..' case explicitly
-        path_segments = file.replace('../', '').split('/')
-        filepath = os.path.join(base_dir, *path_segments)
+        # Construct the path safely
+        filepath = os.path.join(base_dir, file)
         
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
