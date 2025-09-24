@@ -1,7 +1,7 @@
 import asyncio
 import os
 import re
-import git
+import httpx
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
@@ -12,8 +12,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
-REPO_URL = "https://github.com/dteviot/WebToEpub.git"
-REPO_DIR = "webtoepub_repo"
+# --- CHANGED: Point to the new local library folder ---
+REPO_DIR = "webtoepub_lib" 
 
 PARSER_RUNNER_JS = """
 async ([parserScript, url, ...dependencyScripts]) => {
@@ -44,13 +44,13 @@ async ([parserScript, url, ...dependencyScripts]) => {
 
 def _load_dependency_scripts(as_dict=False):
     """
-    Loads all dependency scripts from the repository with robust path handling.
+    Loads all dependency scripts from the local webtoepub_lib directory.
     """
+    # These paths are now relative to your project root
     js_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js"))
     plugin_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin"))
     unittest_dir = os.path.abspath(os.path.join(REPO_DIR, "unitTest"))
 
-    # Define files and their correct base directories
     dependency_map = {
         "_locales/en/messages.json": plugin_dir,
         "polyfillChrome.js": unittest_dir,
@@ -61,9 +61,7 @@ def _load_dependency_scripts(as_dict=False):
 
     scripts = {} if as_dict else []
     for file, base_dir in dependency_map.items():
-        # Construct the path safely
         filepath = os.path.join(base_dir, file)
-        
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
             if file.endswith('.json'):
@@ -78,53 +76,49 @@ def _load_dependency_scripts(as_dict=False):
     return scripts
 
 
-async def update_parsers_from_github(sent_message=None, limit=None):
+# --- REWRITTEN: Lightweight parser update using GitHub API ---
+async def update_parsers_from_github(sent_message=None):
     total_saved_count = 0
-
+    API_URL = "https://api.github.com/repos/dteviot/WebToEpub/contents/plugin/js/parsers"
+    
     async def _log(message):
-        """Logs progress to console or edits a Telegram message."""
         if sent_message:
             await sent_message.edit_text(message)
         else:
             logger.info(f"Parser Update Status: {message}")
 
     try:
-        def git_operations():
-            if os.path.exists(REPO_DIR):
-                repo = git.Repo(REPO_DIR); origin = repo.remotes.origin; origin.pull()
-            else:
-                git.Repo.clone_from(REPO_URL, REPO_DIR)
-        
-        await _log("Updating parsers... (Accessing repository)")
-        await asyncio.to_thread(git_operations)
-        
-        js_dir = os.path.join(REPO_DIR, "plugin", "js")
-        parsers_dir = os.path.join(js_dir, "parsers")
-        if not os.path.isdir(parsers_dir): raise FileNotFoundError("Parsers directory not found.")
-            
-        dependency_scripts = _load_dependency_scripts(as_dict=True)
+        await _log("Fetching parser list from GitHub...")
+        async with httpx.AsyncClient() as client:
+            response = await client.get(API_URL)
+            response.raise_for_status()
+            parser_files_meta = response.json()
 
-        parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js') and f != "Template.js"]
-        if limit:
-            parser_files = parser_files[:limit]
+        # Filter for .js files, excluding Template.js
+        parser_files = [f for f in parser_files_meta if f['name'].endswith('.js') and f['name'] != 'Template.js']
         total_files = len(parser_files)
+        
+        await _log(f"Found {total_files} parsers. Processing...")
+        dependency_scripts = _load_dependency_scripts(as_dict=True)
         
         BATCH_SIZE = 50 
         for i in range(0, total_files, BATCH_SIZE):
-            batch = parser_files[i:i + BATCH_SIZE]
+            batch_meta = parser_files[i:i + BATCH_SIZE]
             batch_to_save = []
             
-            await _log(f"Updating parsers... (Processing batch {i//BATCH_SIZE + 1}/{(total_files + BATCH_SIZE - 1)//BATCH_SIZE})")
+            await _log(f"Processing batch {i//BATCH_SIZE + 1}/{(total_files + BATCH_SIZE - 1)//BATCH_SIZE}...")
             
-            async with async_playwright() as p:
+            async with async_playwright() as p, httpx.AsyncClient() as client:
                 browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
                 page = await browser.new_page()
 
-                for filename in batch:
+                for meta in batch_meta:
                     try:
-                        with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
-                            parser_script = f.read()
-                        
+                        # Download the parser script content
+                        script_res = await client.get(meta['download_url'])
+                        script_res.raise_for_status()
+                        parser_script = script_res.text
+
                         script_tags = "".join([f"<script>{s}</script>" for s in dependency_scripts.values()])
                         html_content = f"""
                         <!DOCTYPE html><html><body>
@@ -144,20 +138,16 @@ async def update_parsers_from_github(sent_message=None, limit=None):
                         domains = await page.evaluate("() => window.registeredDomains")
 
                         if isinstance(domains, list) and domains:
-                            batch_to_save.append({ "filename": filename, "domains": domains, "script": parser_script })
+                            batch_to_save.append({ "filename": meta['name'], "domains": domains, "script": parser_script })
                     except Exception as e:
-                        logger.error(f"Failed to process {filename}: {e}", exc_info=False)
+                        logger.error(f"Failed to process {meta['name']}: {e}", exc_info=False)
                 
                 await browser.close()
-            
+
             if batch_to_save:
                 saved_in_batch = save_parsers_from_repo(batch_to_save)
                 total_saved_count += saved_in_batch
-                await _log(f"Updating parsers... (Saved {total_saved_count}/{total_files} parsers so far)")
-                if i == 0 and saved_in_batch == 0:
-                     await _log("❌ First batch failed to save any parsers. The update process is flawed. Please check logs.")
-                     return
-            await asyncio.sleep(1)
+                await _log(f"Saved {total_saved_count}/{total_files} parsers so far...")
 
         await _log(f"✅ Parser update complete. Successfully saved {total_saved_count}/{total_files} parsers.")
             
@@ -181,7 +171,6 @@ async def get_chapter_list(url: str, user_id: int):
             raise IOError(f"Failed to navigate to URL: {e}")
 
         if repo_parser:
-            # This 'try' block is now more specific and will re-raise critical errors
             try:
                 dependency_scripts = _load_dependency_scripts()
                 result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url] + dependency_scripts)
@@ -195,15 +184,10 @@ async def get_chapter_list(url: str, user_id: int):
                     return result['title'], chapters, True
                 else:
                     logger.error(f"Parser '{repo_parser['filename']}' failed: {result.get('error', 'Unknown error')}")
-            except FileNotFoundError as e:
-                 logger.error(f"CRITICAL: Could not find base parser dependency '{e.filename}' for get_chapter_list.", exc_info=True)
-                 # Re-raise the exception so it's not silently ignored
-                 raise e
             except Exception as e:
                 logger.error(f"An unexpected error occurred while using a specific parser.", exc_info=True)
                 raise e
 
-        
         logger.warning("No specific parser was used. Falling back to generic scraping.")
         html_content = await page.content()
         await browser.close()
