@@ -1,5 +1,6 @@
 import pymongo
 import os
+import re
 from urllib.parse import urlparse
 import logging
 
@@ -71,36 +72,59 @@ def get_repo_parser(url):
     """
     Finds the correct parser by matching the URL's domain against the
     'domains' array stored in the database.
+    This function now uses a more robust regex-based matching to handle subdomains.
     """
     try:
-        hostname = urlparse(url).hostname.lower()
+        hostname = urlparse(url).hostname
         if not hostname:
+            logger.warning(f"Could not parse hostname from URL: {url}")
             return None
+        
+        hostname = hostname.lower()
+        logger.info(f"Searching for parser for hostname: {hostname}")
 
-        # 1. Exact match
+        # 1. Exact match first for performance
+        logger.info(f"Attempting exact match for: {hostname}")
         parser = repo_parsers_collection.find_one({"domains": hostname})
         if parser:
+            logger.info(f"Found exact match: {parser['filename']}")
             return parser
 
-        # 2. Try with/without www.
-        if hostname.startswith("www."):
-            parser = repo_parsers_collection.find_one({"domains": hostname[4:]})
-            if parser:
-                return parser
-        else:
-            parser = repo_parsers_collection.find_one({"domains": f"www.{hostname}"})
-            if parser:
-                return parser
-
-        # 3. Match parent domains
+        # 2. Regex match for subdomains and parent domains
+        # This will match domains like 'www.example.com', 'm.example.com' if 'example.com' is in the database.
+        # It will also match 'example.com' if 'www.example.com' is given.
         parts = hostname.split('.')
-        if len(parts) > 1:
-            for i in range(1, len(parts)):
+        domain_variants = [hostname]
+        if hostname.startswith("www."):
+            domain_variants.append(hostname[4:])
+        else:
+            domain_variants.append(f"www.{hostname}")
+        
+        if len(parts) > 2:
+            for i in range(1, len(parts) - 1):
                 parent_domain = '.'.join(parts[i:])
-                parser = repo_parsers_collection.find_one({"domains": parent_domain})
-                if parser:
-                    return parser
+                domain_variants.append(parent_domain)
+                if not parent_domain.startswith("www."):
+                    domain_variants.append(f"www.{parent_domain}")
+
+        # Create a list of regex patterns to try
+        regex_patterns = []
+        for variant in set(domain_variants):
+            # regex to match the domain, and any subdomains
+            regex_patterns.append(f"^(www\\.)?{re.escape(variant.replace('www.',''))}$")
+
+        logger.info(f"Attempting regex match with patterns: {regex_patterns}")
+
+        for pattern in regex_patterns:
+            # Using $regex operator in pymongo
+            parser = repo_parsers_collection.find_one({"domains": {"$regex": pattern, "$options": "i"}})
+            if parser:
+                logger.info(f"Found regex match with pattern '{pattern}': {parser['filename']}")
+                return parser
+        
+        logger.warning(f"No parser found for hostname: {hostname}")
+
     except Exception as e:
-        logger.error(f"Error finding repo parser for {url}: {e}")
+        logger.error(f"Error finding repo parser for {url}: {e}", exc_info=True)
     
     return None
