@@ -16,8 +16,8 @@ CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/g
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
-# --- CORRECTED JAVASCRIPT RUNNER ---
-# It now accepts a single array `[parserScript, url]` and destructures it.
+# This JS code is a helper to load and execute the external parser scripts
+# inside the browser's context.
 PARSER_RUNNER_JS = """
 async ([parserScript, url]) => {
     try {
@@ -58,7 +58,7 @@ async ([parserScript, url]) => {
 
 async def update_parsers_from_github():
     """
-    Clones/pulls the repo and scans every parser file to extract the domains
+    Clones/pulls the repo and robustly scans every parser file to extract the domains
     it registers, storing this mapping in the database.
     """
     if os.path.exists(REPO_DIR):
@@ -77,25 +77,36 @@ async def update_parsers_from_github():
     parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js')]
     
     parsers_to_save = []
-    domain_regex = re.compile(r'parserFactory\.register\(\s*(\[.*?\]|\".*?\")\s*,', re.DOTALL)
-    
+    # --- THIS IS THE FIX ---
+    # This new, more robust regex correctly handles single domains, multiple domains,
+    # and different quote styles (single or double).
+    domain_regex = re.compile(r'parserFactory\.register\(([^,]+),')
+
     for filename in parser_files:
         filepath = os.path.join(parsers_dir, filename)
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
             match = domain_regex.search(content)
             if match:
-                domains_str = match.group(1).replace("'", '"')
-                try:
-                    domains = [d.strip() for d in domains_str.strip('[]').replace('"', '').split(',') if d.strip()]
-                    if domains:
-                        parsers_to_save.append({
-                            "filename": filename,
-                            "domains": domains,
-                            "script": content
-                        })
-                except Exception as e:
-                    logger.warning(f"Could not parse domains from {filename}: {e}")
+                # The matched group is the raw domain list, e.g., '["a.com", "b.com"]' or '"c.com"'
+                raw_domains = match.group(1).strip()
+                
+                # Clean up the string to make it a valid list of domains
+                # This removes brackets, quotes, and splits by comma
+                cleaned_domains = raw_domains.strip('[]').replace('"', '').replace("'", "")
+                domains = [d.strip() for d in cleaned_domains.split(',') if d.strip()]
+                
+                if domains:
+                    parsers_to_save.append({
+                        "filename": filename,
+                        "domains": domains,
+                        "script": content
+                    })
+                else:
+                    logger.warning(f"Could not extract any domains from matched string '{raw_domains}' in {filename}")
+            else:
+                 logger.warning(f"No domain registration found in {filename}")
+
 
     if parsers_to_save:
         save_parsers_from_repo(parsers_to_save)
@@ -126,9 +137,6 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
 
         if repo_parser:
             logger.info(f"Executing parser '{repo_parser['filename']}' for {url}")
-            
-            # --- THIS IS THE FIX ---
-            # All arguments are now passed inside a single list.
             result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url])
             
             if result and 'error' not in result and result.get('type') == 'chapters':
@@ -136,7 +144,7 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
                 logger.info(f"Parser successfully extracted {len(result['chapters'])} chapters.")
                 chapters = result['chapters']
                 for chapter in chapters:
-                    chapter['url'] = urljoin(url, chapter['url'])
+                    chapter['url'] = urljoin(url, chapter['url']) # Ensure URLs are absolute
                     chapter['selected'] = True
                 return result['title'], chapters, True
             else:
@@ -189,11 +197,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
 
                 if repo_parser:
                     logger.info(f"Executing getContent() from '{repo_parser['filename']}'...")
-
-                    # --- THIS IS THE FIX ---
-                    # The same correction is applied here.
                     result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], chapter_data['url']])
-
                     if result and 'error' not in result and result.get('type') == 'content':
                         chapter_html_content = result['html']
                     else:
