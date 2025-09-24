@@ -40,7 +40,7 @@ async ([parserScript, url, ...dependencyScripts]) => {
         }
         return { error: 'No parser was registered or activated.' };
     } catch (error) {
-        return { error: `JS execution failed: ${error.toString()}` };
+        return { error: `JavaScript execution failed: ${error.toString()}` };
     }
 }
 """
