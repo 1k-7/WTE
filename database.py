@@ -73,14 +73,26 @@ def get_repo_parser(url):
     'domains' array stored in the database.
     """
     try:
-        hostname = urlparse(url).hostname
+        hostname = urlparse(url).hostname.lower()
         if not hostname:
             return None
 
+        # 1. Exact match
         parser = repo_parsers_collection.find_one({"domains": hostname})
         if parser:
             return parser
 
+        # 2. Try with/without www.
+        if hostname.startswith("www."):
+            parser = repo_parsers_collection.find_one({"domains": hostname[4:]})
+            if parser:
+                return parser
+        else:
+            parser = repo_parsers_collection.find_one({"domains": f"www.{hostname}"})
+            if parser:
+                return parser
+
+        # 3. Match parent domains
         parts = hostname.split('.')
         if len(parts) > 1:
             for i in range(1, len(parts)):
