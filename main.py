@@ -214,6 +214,10 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
             return CHAPTER_SELECTION
         await display_chapter_selection(update, context, f"Found {len(chapters)} chapters for '{title}'.")
         return CHAPTER_SELECTION
+    except FileNotFoundError as e:
+        logger.error(f"A required file was not found: {e}", exc_info=True)
+        await update.message.reply_text(f"Error: A required file is missing. Please contact the developer. Details: {e}")
+        return ConversationHandler.END
     except Exception as e:
         logger.error(f"Failed to get chapters: {e}", exc_info=True)
         await update.message.reply_text(f"Could not fetch chapters. Error: {e}")
