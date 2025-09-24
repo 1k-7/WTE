@@ -83,6 +83,7 @@ async def generate_parsers_manifest(sent_message):
                 with open(filepath, 'r', encoding='utf-8') as f:
                     parser_script = f.read()
 
+                # Use data URL method to isolate script execution
                 script_tags = "".join([f"<script>{s}</script>" for s in dependency_scripts_list])
                 html_content = f"<!DOCTYPE html><html><body>{script_tags}<script>var registeredDomains = []; parserFactory.register = (domains, parser) => {{ if (typeof domains === 'string') {{ registeredDomains.push(domains); }} else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }} }};</script><script>{parser_script}</script></body></html>"
                 data_url = f"data:text/html,{quote(html_content)}"
@@ -105,6 +106,7 @@ async def generate_parsers_manifest(sent_message):
             with open(manifest_path, 'w', encoding='utf-8') as f:
                 json.dump(manifest_data, f, indent=2)
             await sent_message.edit_text(f"✅ Success! `parsers.json` has been generated with {len(manifest_data)} entries. Please restart the bot now.")
+            # Also trigger the DB load
             await load_parsers_from_manifest()
         except Exception as e:
             await sent_message.edit_text(f"❌ ERROR: Could not write to `{manifest_path}`. Reason: {e}")
