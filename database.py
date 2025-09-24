@@ -2,7 +2,6 @@ import pymongo
 import os
 from urllib.parse import urlparse
 import logging
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +50,9 @@ def get_parser_count():
     """Returns the number of parsers loaded from the repository."""
     return repo_parsers_collection.count_documents({})
 
-def clean_repo_parsers():
+def clean_all_parsers():
     """Deletes all parsers from the repository collection."""
+    logger.info("Deleting all existing parsers from the database...")
     result = repo_parsers_collection.delete_many({})
     return result.deleted_count
 
@@ -72,72 +72,40 @@ def get_repo_parser(url):
     """
     Finds the correct parser by matching the URL's domain against the
     'domains' array stored in the database.
-    This function now uses a more robust regex-based matching to handle subdomains.
     """
     try:
         hostname = urlparse(url).hostname
         if not hostname:
-            logger.warning(f"Could not parse hostname from URL: {url}")
             return None
         
         hostname = hostname.lower()
-        logger.info(f"Searching for parser for hostname: {hostname}")
-
-        # Efficiently query for all potential matches using a regex that covers subdomains
-        # This regex will match domains like 'www.example.com', 'm.example.com' if 'example.com' is in the database.
-        # It will also match 'example.com' if 'www.example.com' is given.
-        
-        # To make it more robust, we will create a regex that matches any subdomain of the given hostname.
-        # For example, if the hostname is "www.wuxiaworld.com", we create a regex that matches
-        # "wuxiaworld.com", "www.wuxiaworld.com", "anything.wuxiaworld.com", etc.
-        
-        # We also need to handle cases where the database stores "wuxiaworld.com" and the user provides
-        # "www.wuxiaworld.com" or "m.wuxiaworld.com"
-        
-        # We'll try a few strategies, from most specific to most general.
         
         # 1. Exact match
         parser = repo_parsers_collection.find_one({"domains": hostname})
         if parser:
-            logger.info(f"Found exact match for {hostname}: {parser['filename']}")
             return parser
             
-        # 2. Match without "www." if it exists
+        # 2. Match without "www."
         if hostname.startswith("www."):
             parser = repo_parsers_collection.find_one({"domains": hostname[4:]})
             if parser:
-                logger.info(f"Found match for {hostname[4:]}: {parser['filename']}")
                 return parser
 
-        # 3. Match with "www." if it does not exist
+        # 3. Match with "www."
         else:
             parser = repo_parsers_collection.find_one({"domains": f"www.{hostname}"})
             if parser:
-                logger.info(f"Found match for www.{hostname}: {parser['filename']}")
                 return parser
 
         # 4. Check for parent domain matches.
-        # For example, if the hostname is "m.wuxiaworld.com", this will check for "wuxiaworld.com"
         parts = hostname.split('.')
         if len(parts) > 2:
             for i in range(1, len(parts) - 1):
                 parent_domain = '.'.join(parts[i:])
                 parser = repo_parsers_collection.find_one({"domains": parent_domain})
                 if parser:
-                    logger.info(f"Found parent domain match for {parent_domain}: {parser['filename']}")
                     return parser
         
-        # 5. Final attempt with a more general regex
-        # This is a bit of a catch-all, but it might help in some cases.
-        # This will match any parser where the domain is a substring of the hostname.
-        escaped_hostname = re.escape(hostname)
-        parser = repo_parsers_collection.find_one({"domains": {"$regex": f".*{escaped_hostname}.*"}})
-        if parser:
-            logger.info(f"Found regex substring match for {hostname}: {parser['filename']}")
-            return parser
-
-        logger.warning(f"No parser found for hostname: {hostname}")
-
     except Exception as e:
         logger.error(f"Error finding repo parser for {url}: {e}", exc_info=True)
     
