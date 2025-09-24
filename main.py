@@ -1,4 +1,3 @@
-#w
 import logging
 import os
 import asyncio
@@ -13,8 +12,8 @@ from settings import (
     get_user_settings, handle_settings_callback,
     SETTING_VALUE, handle_setting_value_input, get_main_settings_menu
 )
-from parser import get_chapter_list, create_epub_from_chapters, update_parsers_from_github
-from database import add_custom_parser, clean_repo_parsers
+from parser import get_chapter_list, create_epub_from_chapters, load_local_parsers_to_db
+from database import add_custom_parser
 
 # --- Enable logging ---
 logging.basicConfig(
@@ -27,26 +26,19 @@ TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 PORT = int(os.environ.get('PORT', 8080))
 
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set.")
-if not WEBHOOK_URL:
-    raise ValueError("WEBHOOK_URL environment variable is not set. This is required for webhook mode.")
-
 # --- Conversation states ---
 TARGET_URL, PARSER_FILE = range(2)
 CHAPTER_SELECTION = 0
 
-
 # --- Command Handlers ---
 
 async def start(update: Update, context: CallbackContext) -> None:
-    """Send a welcome message with updated instructions."""
+    """Send a welcome message."""
     await update.message.reply_text(
         'Welcome to the WebToEpub Bot!\n\n'
         'Use /epub <url> to convert a page.\n'
         'Use /settings to configure options.\n'
-        'Use /update_parsers to fetch the latest parsers.\n'
-        'Use /cleanparsers to clear the parser database.'
+        'Use /add_parser to add a custom parser.'
     )
 
 async def settings_command(update: Update, context: CallbackContext) -> None:
@@ -54,23 +46,6 @@ async def settings_command(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
     reply_markup, message = await get_main_settings_menu(user_id)
     await update.message.reply_text(message, reply_markup=reply_markup)
-
-# --- Parser Update Commands ---
-
-async def update_parsers_command(update: Update, context: CallbackContext) -> None:
-    """Starts the full parser update process in the background."""
-    sent_message = await update.message.reply_text("Parser update started... This may take several minutes.")
-    asyncio.create_task(update_parsers_from_github(sent_message))
-
-async def clean_parsers_command(update: Update, context: CallbackContext) -> None:
-    """Clears the repository parsers from the database."""
-    await update.message.reply_text("Cleaning parser database...")
-    try:
-        deleted_count = clean_repo_parsers()
-        await update.message.reply_text(f"Successfully deleted {deleted_count} parsers. You can now run /update_parsers.")
-    except Exception as e:
-        logger.error(f"Error cleaning parsers: {e}", exc_info=True)
-        await update.message.reply_text("An error occurred while cleaning the parser database.")
 
 async def add_parser_start(update: Update, context: CallbackContext) -> int:
     """Start the custom parser upload process."""
@@ -107,7 +82,6 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     else:
         await update.message.reply_text('Operation cancelled.')
     return ConversationHandler.END
-
 
 # --- Chapter Selection and EPUB Creation ---
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -203,10 +177,6 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
             return CHAPTER_SELECTION
         await display_chapter_selection(update, context, f"Found {len(chapters)} chapters for '{title}'.")
         return CHAPTER_SELECTION
-    except FileNotFoundError as e:
-        logger.error(f"A required file was not found: {e}", exc_info=True)
-        await update.message.reply_text(f"Error: A required file is missing. Please contact the developer. Details: {e}")
-        return ConversationHandler.END
     except Exception as e:
         logger.error(f"Failed to get chapters: {e}", exc_info=True)
         await update.message.reply_text(f"Could not fetch chapters. Error: {e}")
@@ -224,14 +194,19 @@ async def handle_default_parser_choice(update: Update, context: CallbackContext)
         return ConversationHandler.END
 
 # --- Main Application Setup ---
+async def on_startup(application: Application):
+    """Loads local parsers into the database when the bot starts."""
+    logger.info("Application starting up, loading local parsers into database...")
+    asyncio.create_task(load_local_parsers_to_db())
+
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Add all command handlers
+    application.post_init = on_startup
+
+    # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
-    application.add_handler(CommandHandler("update_parsers", update_parsers_command))
-    application.add_handler(CommandHandler("cleanparsers", clean_parsers_command))
+    
     # Conversation handlers
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler('epub', epub_command)],
@@ -250,6 +225,7 @@ def main() -> None:
         map_to_parent={ConversationHandler.END: ConversationHandler.END}
     ))
     application.add_handler(CallbackQueryHandler(handle_settings_callback, pattern='^(toggle_|goto_|back_to_)'))
+    
     # Run the bot
     application.run_webhook(listen="0.0.0.0", port=PORT, url_path=TELEGRAM_BOT_TOKEN, webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}")
 
