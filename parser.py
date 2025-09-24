@@ -66,7 +66,7 @@ async def update_parsers_from_github():
     """
     Clones/pulls the repo and uses a local HTML file to create a browser
     environment that perfectly mimics the extension, guaranteeing reliable
-    parser domain extraction.
+    parser domain extraction. This also prevents the bot from hanging.
     """
     if os.path.exists(REPO_DIR):
         repo = git.Repo(REPO_DIR)
@@ -84,6 +84,8 @@ async def update_parsers_from_github():
         logger.error("Parsers directory not found after git operation.")
         return 0
         
+    # --- THIS IS THE CRITICAL FIX ---
+    # Define the exact order of dependencies as per the extension's logic.
     dependency_files = ["Util.js", "Parser.js", "ParserFactory.js"]
     dependency_scripts = {}
     try:
@@ -100,12 +102,9 @@ async def update_parsers_from_github():
     async with async_playwright() as p:
         browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
         
-        # --- THIS IS THE FIX ---
-        # Instead of reusing one page, we create a fresh one for each parser.
-        
         total_files = len(parser_files)
         for i, filename in enumerate(parser_files):
-            # Create a new, clean page for each iteration to prevent resource leaks
+            # Create a new, clean page for each iteration to prevent resource leaks and hanging
             page = await browser.new_page()
             logger.info(f"Processing parser {i+1}/{total_files}: {filename}")
             
@@ -113,34 +112,49 @@ async def update_parsers_from_github():
                 with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
                     parser_script = f.read()
                 
+                # Create a temporary local HTML file to act as our sandbox
+                # This perfectly mimics the extension loading scripts in order.
                 html_content = f"""
-                <!DOCTYPE html><html><head><title>Parser Interrogator</title></head><body>
+                <!DOCTYPE html>
+                <html>
+                <head><title>Parser Interrogator</title></head>
+                <body>
                     <script>{dependency_scripts["Util.js"]}</script>
                     <script>{dependency_scripts["Parser.js"]}</script>
                     <script>{dependency_scripts["ParserFactory.js"]}</script>
                     <script>
                         let registeredDomains = [];
                         parserFactory.register = (domains, parser) => {{
-                            if (typeof domains === 'string') {{ registeredDomains.push(domains); }}
-                            else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }}
+                            if (typeof domains === 'string') {{
+                                registeredDomains.push(domains);
+                            }} else if (Array.isArray(domains)) {{
+                                registeredDomains.push(...domains);
+                            }}
                         }};
                     </script>
                     <script>{parser_script}</script>
-                </body></html>
+                </body>
+                </html>
                 """
                 
+                # Use a data URL to load the local HTML content
                 data_url = f"data:text/html,{quote(html_content)}"
-                await page.goto(data_url, timeout=10000) # Add a timeout
-                
+                await page.goto(data_url, timeout=15000) # Add a generous timeout
+
+                # Now that the page has loaded and run the scripts, extract the result.
                 domains = await page.evaluate("() => window.registeredDomains")
 
                 if isinstance(domains, list) and domains:
-                    parsers_to_save.append({ "filename": filename, "domains": domains, "script": parser_script })
+                    parsers_to_save.append({
+                        "filename": filename,
+                        "domains": domains,
+                        "script": parser_script
+                    })
                 
             except Exception as e:
                 logger.error(f"Failed to process parser file {filename}: {e}", exc_info=True)
             finally:
-                # Crucially, close the page to release its resources
+                # Crucially, close the page to release its resources and prevent hanging
                 await page.close()
         
         await browser.close()
@@ -180,7 +194,6 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
                 result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url] + dependency_scripts)
                 
                 if result and 'error' not in result and result.get('type') == 'chapters':
-                    await page.close()
                     await browser.close()
                     logger.info(f"Parser successfully extracted {len(result['chapters'])} chapters.")
                     chapters = result['chapters']
@@ -195,7 +208,6 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
         
         logger.warning("No parser found or parser failed. Falling back to generic scraping.")
         html_content = await page.content()
-        await page.close()
         await browser.close()
         soup = BeautifulSoup(html_content, 'html.parser')
         title = (soup.find('title').string or 'Untitled').strip()
@@ -205,7 +217,6 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
         if not chapters:
             chapters = [{'title': "Full Page Content", 'url': url, 'selected': True}]
         return title, chapters, False
-
 
 async def create_epub_from_chapters(chapters: list, title: str, settings: dict) -> (str, str):
     final_filename = re.sub(r'[\\/*?:"<>|]', "", title)
