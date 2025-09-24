@@ -238,12 +238,12 @@ async def handle_default_parser_choice(update: Update, context: CallbackContext)
 # --- Main Application Setup ---
 async def on_startup(application: Application):
     """
-    Ensures the parser database is populated when the bot starts.
+    Schedules the parser update to run in the background so the bot can start immediately.
     """
-    logger.info("Application starting up, running parser database update...")
-    # Run the update function without a message object. It will log to console.
-    await update_parsers_from_github()
-    logger.info("Startup parser update finished.")
+    logger.info("Application starting up, scheduling parser database update...")
+    # Run the update function as a background task so it doesn't block startup
+    asyncio.create_task(update_parsers_from_github())
+    logger.info("Startup complete. Parser update is running in the background.")
 
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
