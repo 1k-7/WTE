@@ -12,41 +12,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
-# --- CHANGED: Point to the new local library folder ---
 REPO_DIR = "webtoepub_lib" 
-
-PARSER_RUNNER_JS = """
-async ([parserScript, url, ...dependencyScripts]) => {
-    try {
-        let activeParserInstance = null;
-        for (const script of dependencyScripts) { eval(script); }
-        parserFactory.register = (domains, parser) => {
-            activeParserInstance = new parser(url, document);
-        };
-        eval(parserScript);
-        if (activeParserInstance) {
-            const parser = activeParserInstance;
-            if (parser.isChapterUrl && parser.isChapterUrl(url)) {
-                 const contentElement = await parser.getContent();
-                 return { type: 'content', html: contentElement.innerHTML };
-            } else {
-                const chapters = await parser.getChapters();
-                const novelTitle = parser.getNovelTitle ? parser.getNovelTitle() : document.title;
-                return { type: 'chapters', title: novelTitle, chapters: chapters.map(ch => ({ title: ch.title, url: ch.url })) };
-            }
-        }
-        return { error: 'No parser was registered or activated.' };
-    } catch (error) {
-        return { error: `JavaScript execution failed: ${error.toString()}` };
-    }
-}
-"""
 
 def _load_dependency_scripts(as_dict=False):
     """
     Loads all dependency scripts from the local webtoepub_lib directory.
     """
-    # These paths are now relative to your project root
     js_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js"))
     plugin_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin"))
     unittest_dir = os.path.abspath(os.path.join(REPO_DIR, "unitTest"))
@@ -76,7 +47,6 @@ def _load_dependency_scripts(as_dict=False):
     return scripts
 
 
-# --- REWRITTEN: Lightweight parser update using GitHub API ---
 async def update_parsers_from_github(sent_message=None):
     total_saved_count = 0
     API_URL = "https://api.github.com/repos/dteviot/WebToEpub/contents/plugin/js/parsers"
@@ -94,7 +64,6 @@ async def update_parsers_from_github(sent_message=None):
             response.raise_for_status()
             parser_files_meta = response.json()
 
-        # Filter for .js files, excluding Template.js
         parser_files = [f for f in parser_files_meta if f['name'].endswith('.js') and f['name'] != 'Template.js']
         total_files = len(parser_files)
         
@@ -114,7 +83,6 @@ async def update_parsers_from_github(sent_message=None):
 
                 for meta in batch_meta:
                     try:
-                        # Download the parser script content
                         script_res = await client.get(meta['download_url'])
                         script_res.raise_for_status()
                         parser_script = script_res.text
@@ -159,6 +127,7 @@ async def update_parsers_from_github(sent_message=None):
 async def get_chapter_list(url: str, user_id: int):
     if not os.path.exists(CHROME_EXECUTABLE_PATH):
         raise FileNotFoundError(f"FATAL: Chrome executable not found: {CHROME_EXECUTABLE_PATH}")
+    
     repo_parser = get_repo_parser(url)
     
     async with async_playwright() as p:
@@ -172,8 +141,31 @@ async def get_chapter_list(url: str, user_id: int):
 
         if repo_parser:
             try:
+                # --- REWRITTEN LOGIC ---
                 dependency_scripts = _load_dependency_scripts()
-                result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url] + dependency_scripts)
+                for script_content in dependency_scripts:
+                    await page.add_script_tag(content=script_content)
+
+                result = await page.evaluate("""
+                    async (parserScript) => {
+                        try {
+                            let activeParserInstance = null;
+                            parserFactory.register = (domains, parser) => {
+                                activeParserInstance = new parser(document.URL, document);
+                            };
+                            eval(parserScript);
+                            if (activeParserInstance) {
+                                const parser = activeParserInstance;
+                                const chapters = await parser.getChapters();
+                                const novelTitle = parser.getNovelTitle ? parser.getNovelTitle() : document.title;
+                                return { type: 'chapters', title: novelTitle, chapters: chapters.map(ch => ({ title: ch.title, url: ch.url })) };
+                            }
+                            return { error: 'No parser was registered or activated.' };
+                        } catch (error) {
+                            return { error: `JavaScript execution failed: ${error.toString()}` };
+                        }
+                    }
+                """, repo_parser['script'])
                 
                 if result and 'error' not in result and result.get('type') == 'chapters':
                     await browser.close()
@@ -185,8 +177,7 @@ async def get_chapter_list(url: str, user_id: int):
                 else:
                     logger.error(f"Parser '{repo_parser['filename']}' failed: {result.get('error', 'Unknown error')}")
             except Exception as e:
-                logger.error(f"An unexpected error occurred while using a specific parser.", exc_info=True)
-                raise e
+                logger.error(f"An unexpected error occurred while using a specific parser: {e}", exc_info=True)
 
         logger.warning("No specific parser was used. Falling back to generic scraping.")
         html_content = await page.content()
@@ -209,12 +200,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
     book.add_author('WebToEpub Bot')
     book_spine = ['nav']
     
-    dependency_scripts = []
-    try:
-        dependency_scripts = _load_dependency_scripts()
-    except FileNotFoundError:
-        logger.error("Could not load dependency scripts for EPUB creation.", exc_info=True)
-        dependency_scripts = []
+    dependency_scripts = _load_dependency_scripts()
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
@@ -225,14 +211,37 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
                 await page.goto(chapter_data['url'], wait_until='networkidle', timeout=60000)
                 repo_parser = get_repo_parser(chapter_data['url'])
                 chapter_html_content = ''
-                if repo_parser and dependency_scripts:
-                    result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], chapter_data['url']] + dependency_scripts)
+                if repo_parser:
+                    # --- REWRITTEN LOGIC ---
+                    for script_content in dependency_scripts:
+                        await page.add_script_tag(content=script_content)
+
+                    result = await page.evaluate("""
+                        async (parserScript) => {
+                            try {
+                                let activeParserInstance = null;
+                                parserFactory.register = (domains, parser) => {
+                                    activeParserInstance = new parser(document.URL, document);
+                                };
+                                eval(parserScript);
+                                if (activeParserInstance && parser.isChapterUrl && parser.isChapterUrl(document.URL)) {
+                                    const contentElement = await activeParserInstance.getContent();
+                                    return { type: 'content', html: contentElement.innerHTML };
+                                }
+                                return { error: 'Parser is not a chapter URL parser or failed.' };
+                            } catch (error) {
+                                return { error: `JavaScript execution failed: ${error.toString()}` };
+                            }
+                        }
+                    """, repo_parser['script'])
+
                     if result and 'error' not in result and result.get('type') == 'content':
                         chapter_html_content = result['html']
                     else:
-                        chapter_html_content = await page.content()
+                        chapter_html_content = await page.content() # Fallback
                 else:
                     chapter_html_content = await page.content()
+
                 final_html = f"<h1>{chapter_data['title']}</h1>{chapter_html_content}"
                 epub_chapter = epub.EpubHtml(title=chapter_data['title'], file_name=f'chap_{i+1}.xhtml', lang='en')
                 epub_chapter.content = final_html
