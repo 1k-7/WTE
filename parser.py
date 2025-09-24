@@ -141,11 +141,11 @@ async def get_chapter_list(url: str, user_id: int):
 
         if repo_parser:
             try:
-                # --- REWRITTEN LOGIC ---
                 dependency_scripts = _load_dependency_scripts()
                 for script_content in dependency_scripts:
                     await page.add_script_tag(content=script_content)
 
+                # This JS block now correctly handles both chapter pages and index pages.
                 result = await page.evaluate("""
                     async (parserScript) => {
                         try {
@@ -154,11 +154,25 @@ async def get_chapter_list(url: str, user_id: int):
                                 activeParserInstance = new parser(document.URL, document);
                             };
                             eval(parserScript);
+                            
                             if (activeParserInstance) {
                                 const parser = activeParserInstance;
-                                const chapters = await parser.getChapters();
-                                const novelTitle = parser.getNovelTitle ? parser.getNovelTitle() : document.title;
-                                return { type: 'chapters', title: novelTitle, chapters: chapters.map(ch => ({ title: ch.title, url: ch.url })) };
+                                // Check if the current URL is a chapter page according to the parser
+                                if (parser.isChapterUrl && parser.isChapterUrl(document.URL)) {
+                                    const novelTitle = parser.getNovelTitle ? parser.getNovelTitle() : document.title;
+                                    const chapterTitle = parser.getChapterTitle ? parser.getChapterTitle() : document.title;
+                                    // Return a list containing only this single chapter
+                                    return {
+                                        type: 'chapters',
+                                        title: novelTitle,
+                                        chapters: [{ title: chapterTitle, url: document.URL }]
+                                    };
+                                } else {
+                                    // If it's not a chapter page, assume it's an index page and get all chapters
+                                    const chapters = await parser.getChapters();
+                                    const novelTitle = parser.getNovelTitle ? parser.getNovelTitle() : document.title;
+                                    return { type: 'chapters', title: novelTitle, chapters: chapters.map(ch => ({ title: ch.title, url: ch.url })) };
+                                }
                             }
                             return { error: 'No parser was registered or activated.' };
                         } catch (error) {
@@ -212,10 +226,10 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
                 repo_parser = get_repo_parser(chapter_data['url'])
                 chapter_html_content = ''
                 if repo_parser:
-                    # --- REWRITTEN LOGIC ---
                     for script_content in dependency_scripts:
                         await page.add_script_tag(content=script_content)
-
+                    
+                    # This JS block correctly gets the content from a chapter page
                     result = await page.evaluate("""
                         async (parserScript) => {
                             try {
@@ -224,11 +238,11 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
                                     activeParserInstance = new parser(document.URL, document);
                                 };
                                 eval(parserScript);
-                                if (activeParserInstance && parser.isChapterUrl && parser.isChapterUrl(document.URL)) {
+                                if (activeParserInstance && activeParserInstance.isChapterUrl && activeParserInstance.isChapterUrl(document.URL)) {
                                     const contentElement = await activeParserInstance.getContent();
                                     return { type: 'content', html: contentElement.innerHTML };
                                 }
-                                return { error: 'Parser is not a chapter URL parser or failed.' };
+                                return { error: 'Parser is not a chapter URL parser or failed to get content.' };
                             } catch (error) {
                                 return { error: `JavaScript execution failed: ${error.toString()}` };
                             }
@@ -238,7 +252,8 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
                     if result and 'error' not in result and result.get('type') == 'content':
                         chapter_html_content = result['html']
                     else:
-                        chapter_html_content = await page.content() # Fallback
+                        logger.error(f"Parser '{repo_parser['filename']}' failed to get content: {result.get('error', 'Unknown error')}")
+                        chapter_html_content = await page.content() # Fallback to grabbing the whole page
                 else:
                     chapter_html_content = await page.content()
 
