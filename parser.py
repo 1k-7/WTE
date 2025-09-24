@@ -16,24 +16,24 @@ CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/g
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
-# This JS runner now correctly loads all necessary dependencies first.
+# This JS runner now correctly loads ALL necessary dependencies first.
 PARSER_RUNNER_JS = """
-async ([parserScript, url, baseParserScript, utilScript]) => {
+async ([parserScript, url, baseParserScript, utilScript, factoryScript]) => {
     try {
         let activeParserInstance = null;
         
-        // --- PREPARE THE ENVIRONMENT ---
-        // The parser files are not standalone. We must first execute their dependencies.
+        // --- PREPARE THE FULL ENVIRONMENT ---
+        // The parser files are not standalone. They depend on these core scripts.
         eval(utilScript);
         eval(baseParserScript);
+        eval(factoryScript);
 
-        const parserFactory = {
-            register: (domains, parser) => {
-                activeParserInstance = new parser(url, document);
-            }
+        // parserFactory is now defined, so this will work.
+        parserFactory.register = (domains, parser) => {
+            activeParserInstance = new parser(url, document);
         };
 
-        // Now execute the actual parser script which depends on the above files
+        // Now execute the actual parser script
         eval(parserScript);
 
         if (activeParserInstance) {
@@ -83,12 +83,14 @@ async def update_parsers_from_github():
         return 0
         
     # --- THIS IS THE CRITICAL FIX ---
-    # Load required dependency scripts that all parsers rely on.
+    # Load ALL required dependency scripts that parsers rely on.
     try:
-        with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
-            base_parser_script = f.read()
         with open(os.path.join(js_dir, "Util.js"), 'r', encoding='utf-8') as f:
             util_script = f.read()
+        with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
+            base_parser_script = f.read()
+        with open(os.path.join(js_dir, "ParserFactory.js"), 'r', encoding='utf-8') as f:
+            factory_script = f.read()
     except FileNotFoundError as e:
         logger.error(f"FATAL: Could not find base parser dependencies: {e}")
         return 0
@@ -96,26 +98,23 @@ async def update_parsers_from_github():
     parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js') and f != "Template.js"]
     parsers_to_save = []
     
-    # This script runs in the browser to interrogate each parser file.
     interrogator_js = """
-    async ([parserScript, baseParserScript, utilScript]) => {
+    async ([parserScript, baseParserScript, utilScript, factoryScript]) => {
         let registeredDomains = [];
-        // Create the environment the parser expects.
+        // Create the full environment the parser expects.
         eval(utilScript);
         eval(baseParserScript);
+        eval(factoryScript);
         
-        const parserFactory = {
-            register: (domains, parser) => {
-                if (typeof domains === 'string') {
-                    registeredDomains.push(domains);
-                } else if (Array.isArray(domains)) {
-                    registeredDomains.push(...domains);
-                }
+        parserFactory.register = (domains, parser) => {
+            if (typeof domains === 'string') {
+                registeredDomains.push(domains);
+            } else if (Array.isArray(domains)) {
+                registeredDomains.push(...domains);
             }
         };
 
         try {
-            // Execute the specific parser file.
             eval(parserScript);
             return registeredDomains;
         } catch (e) {
@@ -134,8 +133,8 @@ async def update_parsers_from_github():
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read()
                 
-                # Execute the interrogator, passing in the parser and its dependencies.
-                domains = await page.evaluate(interrogator_js, [content, base_parser_script, util_script])
+                # Execute the interrogator, passing in the parser and all its dependencies.
+                domains = await page.evaluate(interrogator_js, [content, base_parser_script, util_script, factory_script])
 
                 if isinstance(domains, list) and domains:
                     parsers_to_save.append({
@@ -155,7 +154,7 @@ async def update_parsers_from_github():
         save_parsers_from_repo(parsers_to_save)
         logger.info(f"Successfully saved {len(parsers_to_save)} parsers to the database.")
     else:
-        logger.error("Parser update process finished, but no parsers were saved.")
+        logger.error("Parser update process finished, but no parsers were saved. This indicates a fundamental issue.")
 
     return len(parsers_to_save)
 
@@ -185,12 +184,14 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
             logger.info(f"Executing parser '{repo_parser['filename']}' for {url}")
             js_dir = os.path.join(REPO_DIR, "plugin", "js")
             try:
-                with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
-                    base_parser_script = f.read()
                 with open(os.path.join(js_dir, "Util.js"), 'r', encoding='utf-8') as f:
                     util_script = f.read()
+                with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
+                    base_parser_script = f.read()
+                with open(os.path.join(js_dir, "ParserFactory.js"), 'r', encoding='utf-8') as f:
+                    factory_script = f.read()
                 
-                result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url, base_parser_script, util_script])
+                result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url, base_parser_script, util_script, factory_script])
                 
                 if result and 'error' not in result and result.get('type') == 'chapters':
                     await browser.close()
@@ -235,12 +236,14 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
     
     js_dir = os.path.join(REPO_DIR, "plugin", "js")
     try:
-        with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
-            base_parser_script = f.read()
         with open(os.path.join(js_dir, "Util.js"), 'r', encoding='utf-8') as f:
             util_script = f.read()
+        with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
+            base_parser_script = f.read()
+        with open(os.path.join(js_dir, "ParserFactory.js"), 'r', encoding='utf-8') as f:
+            factory_script = f.read()
     except FileNotFoundError:
-        base_parser_script, util_script = "", ""
+        base_parser_script, util_script, factory_script = "", "", ""
         logger.error("Could not load base parser files for content extraction.")
 
     async with async_playwright() as p:
@@ -262,7 +265,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
 
                 if repo_parser and base_parser_script:
                     logger.info(f"Executing getContent() from '{repo_parser['filename']}'...")
-                    result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], chapter_data['url'], base_parser_script, util_script])
+                    result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], chapter_data['url'], base_parser_script, util_script, factory_script])
                     if result and 'error' not in result and result.get('type') == 'content':
                         chapter_html_content = result['html']
                     else:
