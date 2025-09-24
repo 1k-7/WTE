@@ -46,9 +46,9 @@ def _load_dependency_scripts(as_dict=False):
     """
     Loads all dependency scripts from the repository with robust path handling.
     """
-    js_dir = os.path.join(REPO_DIR, "plugin", "js")
-    plugin_dir = os.path.join(REPO_DIR, "plugin")
-    unittest_dir = os.path.join(REPO_DIR, "unitTest")
+    js_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js"))
+    plugin_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin"))
+    unittest_dir = os.path.abspath(os.path.join(REPO_DIR, "unitTest"))
 
     # Define files and their correct base directories
     dependency_map = {
