@@ -46,33 +46,34 @@ def _load_dependency_scripts(as_dict=False):
     """
     Loads all dependency scripts from the repository with robust path handling.
     """
-    js_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js"))
-    plugin_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin"))
-    unittest_dir = os.path.abspath(os.path.join(REPO_DIR, "unitTest"))
+    repo_root = os.path.abspath(REPO_DIR)
 
-    # Define files and their correct base directories
-    dependency_map = {
-        "_locales/en/messages.json": plugin_dir,
-        "polyfillChrome.js": unittest_dir,
-        "EpubItem.js": js_dir, "DebugUtil.js": js_dir, "HttpClient.js": js_dir,
-        "ImageCollector.js": js_dir, "Imgur.js": js_dir, "Parser.js": js_dir,
-        "ParserFactory.js": js_dir, "UserPreferences.js": js_dir, "Util.js": js_dir,
+    # Define files with paths relative to the repo root
+    dependency_files = {
+        "_locales/en/messages.json": os.path.join(repo_root, "plugin", "_locales", "en", "messages.json"),
+        "polyfillChrome.js": os.path.join(repo_root, "unitTest", "polyfillChrome.js"),
+        "EpubItem.js": os.path.join(repo_root, "plugin", "js", "EpubItem.js"),
+        "DebugUtil.js": os.path.join(repo_root, "plugin", "js", "DebugUtil.js"),
+        "HttpClient.js": os.path.join(repo_root, "plugin", "js", "HttpClient.js"),
+        "ImageCollector.js": os.path.join(repo_root, "plugin", "js", "ImageCollector.js"),
+        "Imgur.js": os.path.join(repo_root, "plugin", "js", "Imgur.js"),
+        "Parser.js": os.path.join(repo_root, "plugin", "js", "Parser.js"),
+        "ParserFactory.js": os.path.join(repo_root, "plugin", "js", "ParserFactory.js"),
+        "UserPreferences.js": os.path.join(repo_root, "plugin", "js", "UserPreferences.js"),
+        "Util.js": os.path.join(repo_root, "plugin", "js", "Util.js"),
     }
 
     scripts = {} if as_dict else []
-    for file, base_dir in dependency_map.items():
-        # Construct the path safely
-        filepath = os.path.join(base_dir, file)
-        
+    for key, filepath in dependency_files.items():
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
-            if file.endswith('.json'):
+            if key.endswith('.json'):
                 script_content = f'const messages = {content};'
             else:
                 script_content = content
             
             if as_dict:
-                scripts[file] = script_content
+                scripts[key] = script_content
             else:
                 scripts.append(script_content)
     return scripts
@@ -159,6 +160,8 @@ async def update_parsers_from_github(sent_message, limit=None):
 
 
 async def get_chapter_list(url: str, user_id: int):
+    if not os.path.exists(REPO_DIR):
+        raise FileNotFoundError(f"'{REPO_DIR}' not found. Please run /update_parsers first.")
     if not os.path.exists(CHROME_EXECUTABLE_PATH):
         raise FileNotFoundError(f"FATAL: Chrome executable not found: {CHROME_EXECUTABLE_PATH}")
     repo_parser = get_repo_parser(url)
@@ -209,6 +212,8 @@ async def get_chapter_list(url: str, user_id: int):
 
 
 async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
+    if not os.path.exists(REPO_DIR):
+        raise FileNotFoundError(f"'{REPO_DIR}' not found. Please run /update_parsers first.")
     final_filename = re.sub(r'[\\/*?:"<>|]', "", title)
     book = epub.EpubBook()
     book.set_identifier('id' + title)
