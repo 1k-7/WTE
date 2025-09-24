@@ -2,7 +2,7 @@ import logging
 import os
 import asyncio
 import re
-from telegram import Update
+from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
     CallbackContext, CallbackQueryHandler, ConversationHandler
@@ -12,7 +12,7 @@ from settings import (
     get_user_settings, handle_settings_callback,
     SETTING_VALUE, handle_setting_value_input, get_main_settings_menu
 )
-from parser import get_chapter_list, create_epub_from_chapters, load_local_parsers_to_db
+from parser import get_chapter_list, create_epub_from_chapters, load_parsers_from_manifest, generate_parsers_manifest
 from database import add_custom_parser
 
 # --- Enable logging ---
@@ -34,18 +34,31 @@ CHAPTER_SELECTION = 0
 
 async def start(update: Update, context: CallbackContext) -> None:
     """Send a welcome message."""
-    await update.message.reply_text(
+    start_message = (
         'Welcome to the WebToEpub Bot!\n\n'
-        'Use /epub <url> to convert a page.\n'
-        'Use /settings to configure options.\n'
-        'Use /add_parser to add a custom parser.'
+        '**Instructions:**\n'
+        '1. After deploying, run `/parserjson` ONCE to set up your parsers. This will take a long time.\n'
+        '2. Once finished, the bot is ready to use.\n\n'
+        '**Available Commands:**\n'
+        '/epub <url> - Convert a page.\n'
+        '/settings - Configure options.\n'
+        '/add_parser - Add a custom parser.\n'
+        '/parserjson - (Admin) Generate the parsers.json manifest file.'
     )
+    await update.message.reply_text(start_message)
 
 async def settings_command(update: Update, context: CallbackContext) -> None:
     """Display the main settings menu."""
     user_id = update.message.from_user.id
     reply_markup, message = await get_main_settings_menu(user_id)
     await update.message.reply_text(message, reply_markup=reply_markup)
+    
+async def generate_manifest_command(update: Update, context: CallbackContext) -> None:
+    """Triggers the generation of the parsers.json manifest file."""
+    sent_message = await update.message.reply_text("Starting `parsers.json` generation... This will take a very long time and the bot will be unresponsive.")
+    # Run the generation in the background
+    asyncio.create_task(generate_parsers_manifest(sent_message))
+
 
 async def add_parser_start(update: Update, context: CallbackContext) -> int:
     """Start the custom parser upload process."""
@@ -195,9 +208,9 @@ async def handle_default_parser_choice(update: Update, context: CallbackContext)
 
 # --- Main Application Setup ---
 async def on_startup(application: Application):
-    """Loads local parsers into the database when the bot starts."""
-    logger.info("Application starting up, loading local parsers into database...")
-    asyncio.create_task(load_local_parsers_to_db())
+    """Loads local parsers from the manifest file into the database."""
+    logger.info("Application starting up, loading parsers from manifest...")
+    asyncio.create_task(load_parsers_from_manifest())
 
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -206,6 +219,7 @@ def main() -> None:
     # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
+    application.add_handler(CommandHandler("parserjson", generate_manifest_command)) # New Command
     
     # Conversation handlers
     application.add_handler(ConversationHandler(
