@@ -99,7 +99,7 @@ async def update_parsers_from_github(sent_message, limit=None):
                         <!DOCTYPE html><html><body>
                             {script_tags}
                             <script>
-                                let registeredDomains = [];
+                                var registeredDomains = [];
                                 parserFactory.register = (domains, parser) => {{
                                     if (typeof domains === 'string') {{ registeredDomains.push(domains); }}
                                     else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }}
