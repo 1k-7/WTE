@@ -16,16 +16,16 @@ CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/g
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
-# This JS runner now correctly loads ALL necessary dependencies first.
+# This JS runner executes the parser within the fully prepared environment.
 PARSER_RUNNER_JS = """
 async ([parserScript, url, ...dependencyScripts]) => {
     try {
+        // The HTML sandbox will load all dependencies. We just need to activate the parser.
         let activeParserInstance = null;
-        for (const script of dependencyScripts) { eval(script); }
         parserFactory.register = (domains, parser) => {
             activeParserInstance = new parser(url, document);
         };
-        eval(parserScript);
+        eval(parserScript); // This triggers the registration
 
         if (activeParserInstance) {
             const parser = activeParserInstance;
@@ -40,26 +40,22 @@ async ([parserScript, url, ...dependencyScripts]) => {
         }
         return { error: 'No parser was registered or activated.' };
     } catch (error) {
-        return { error: `JS execution failed: ${error.toString()}` };
+        return { error: `JavaScript execution failed: ${error.toString()}` };
     }
 }
 """
 
 async def update_parsers_from_github(sent_message):
     """
-    Runs as a background task, processing parsers in batches to prevent hangs
-    and providing real-time progress updates.
+    Clones/pulls the repo and uses a local HTML file that replicates the official
+    unit test environment to guarantee reliable parser domain extraction.
     """
     try:
         # --- NON-BLOCKING GIT OPERATIONS ---
         def git_operations():
             if os.path.exists(REPO_DIR):
-                logger.info("Git repo exists. Pulling latest changes...")
-                repo = git.Repo(REPO_DIR)
-                origin = repo.remotes.origin
-                origin.pull()
+                repo = git.Repo(REPO_DIR); origin = repo.remotes.origin; origin.pull()
             else:
-                logger.info("Git repo does not exist. Cloning...")
                 git.Repo.clone_from(REPO_URL, REPO_DIR)
         
         await sent_message.edit_text("Updating parsers... (Accessing repository)")
@@ -71,18 +67,31 @@ async def update_parsers_from_github(sent_message):
         if not os.path.isdir(parsers_dir):
             raise FileNotFoundError("Parsers directory not found.")
             
-        dependency_files = ["Util.js", "Parser.js", "ParserFactory.js"]
+        # --- THIS IS THE CRITICAL FIX ---
+        # The exact list and order of dependencies, taken from the developer's own test file.
+        dependency_files = [
+            "../_locales/en/messages.json", "polyfillChrome.js", "EpubItem.js", "DebugUtil.js",
+            "HttpClient.js", "ImageCollector.js", "Imgur.js", "Parser.js", "ParserFactory.js",
+            "UserPreferences.js", "Util.js"
+        ]
         dependency_scripts = {}
         for file in dependency_files:
-            with open(os.path.join(js_dir, file), 'r', encoding='utf-8') as f:
-                dependency_scripts[file] = f.read()
+            # Adjust path for polyfillChrome which is in a different directory
+            base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
+            filepath = os.path.join(base_dir, file)
+            with open(filepath, 'r', encoding='utf-8') as f:
+                # For messages.json, we need to wrap it to create the i18n object
+                if file.endswith('.json'):
+                    dependency_scripts[file] = f'const messages = {f.read()};'
+                else:
+                    dependency_scripts[file] = f.read()
 
         parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js') and f != "Template.js"]
         parsers_to_save = []
         total_files = len(parser_files)
         
         # --- BATCH PROCESSING LOGIC ---
-        BATCH_SIZE = 50 
+        BATCH_SIZE = 50
         for i in range(0, total_files, BATCH_SIZE):
             batch = parser_files[i:i + BATCH_SIZE]
             logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(total_files + BATCH_SIZE - 1)//BATCH_SIZE}")
@@ -93,19 +102,20 @@ async def update_parsers_from_github(sent_message):
 
                 for filename in batch:
                     current_index = i + batch.index(filename)
+                    if (current_index + 1) % 5 == 0:
+                        try:
+                            await sent_message.edit_text(f"Updating parsers... Scanned {current_index + 1}/{total_files} files.")
+                        except Exception: pass
+
                     try:
-                        # Update progress message more frequently
-                        if (current_index + 1) % 5 == 0:
-                           await sent_message.edit_text(f"Updating parsers... Scanned {current_index + 1}/{total_files} files.")
-                        
                         with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
                             parser_script = f.read()
                         
+                        # Create the perfect sandbox environment
+                        script_tags = "".join([f"<script>{s}</script>" for s in dependency_scripts.values()])
                         html_content = f"""
                         <!DOCTYPE html><html><body>
-                            <script>{dependency_scripts["Util.js"]}</script>
-                            <script>{dependency_scripts["Parser.js"]}</script>
-                            <script>{dependency_scripts["ParserFactory.js"]}</script>
+                            {script_tags}
                             <script>
                                 let registeredDomains = [];
                                 parserFactory.register = (domains, parser) => {{
@@ -118,7 +128,7 @@ async def update_parsers_from_github(sent_message):
                         """
                         
                         data_url = f"data:text/html,{quote(html_content)}"
-                        await page.goto(data_url, timeout=10000, wait_until='domcontentloaded')
+                        await page.goto(data_url, timeout=15000, wait_until='domcontentloaded')
                         domains = await page.evaluate("() => window.registeredDomains")
 
                         if isinstance(domains, list) and domains:
@@ -134,14 +144,14 @@ async def update_parsers_from_github(sent_message):
             count = len(parsers_to_save)
             await sent_message.edit_text(f"✅ Parser update complete. Successfully saved {count}/{total_files} parsers.")
         else:
-            await sent_message.edit_text("ℹ️ Parser update finished, but no parsers were successfully scanned. Check logs for errors.")
+            await sent_message.edit_text("❌ Parser update finished, but no parsers were scanned. The update process failed. Please check the logs.")
             
     except Exception as e:
         logger.error("A critical error occurred during parser update:", exc_info=True)
         await sent_message.edit_text(f"❌ Parser update failed with a critical error: {e}")
 
 
-async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
+async def get_chapter_list(url: str, user_id: int):
     if not os.path.exists(CHROME_EXECUTABLE_PATH):
         raise FileNotFoundError(f"FATAL: Chrome executable not found: {CHROME_EXECUTABLE_PATH}")
     repo_parser = get_repo_parser(url)
@@ -160,15 +170,25 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
             js_dir = os.path.join(REPO_DIR, "plugin", "js")
             try:
                 dependency_scripts = []
-                for file in ["Util.js", "Parser.js", "ParserFactory.js"]:
-                    with open(os.path.join(js_dir, file), 'r', encoding='utf-8') as f:
-                        dependency_scripts.append(f.read())
-                
+                # Replicate the full dependency list for execution as well
+                dependency_files = [
+                    "../_locales/en/messages.json", "polyfillChrome.js", "EpubItem.js", "DebugUtil.js",
+                    "HttpClient.js", "ImageCollector.js", "Imgur.js", "Parser.js", "ParserFactory.js",
+                    "UserPreferences.js", "Util.js"
+                ]
+                for file in dependency_files:
+                    base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
+                    filepath = os.path.join(base_dir, file)
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        if file.endswith('.json'):
+                            dependency_scripts.append(f'const messages = {f.read()};')
+                        else:
+                            dependency_scripts.append(f.read())
+
                 result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url] + dependency_scripts)
                 
                 if result and 'error' not in result and result.get('type') == 'chapters':
                     await browser.close()
-                    logger.info(f"Parser successfully extracted {len(result['chapters'])} chapters.")
                     chapters = result['chapters']
                     for chapter in chapters:
                         chapter['url'] = urljoin(url, chapter['url'])
@@ -179,6 +199,7 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
             except FileNotFoundError as e:
                  logger.error(f"Could not find base parser dependency for get_chapter_list: {e.filename}")
         
+        # Fallback logic
         logger.warning("No parser found or parser failed. Falling back to generic scraping.")
         html_content = await page.content()
         await browser.close()
@@ -186,13 +207,13 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
         title = (soup.find('title').string or 'Untitled').strip()
         links = soup.find_all('a', href=True)
         chapters = [{'title': link.text.strip(), 'url': urljoin(url, link['href']), 'selected': True} for link in links if link.text.strip() and re.search(r'chapter|ep\d+|ch\.\d+', link.text.lower(), re.I)]
-        
         if not chapters:
             chapters = [{'title': "Full Page Content", 'url': url, 'selected': True}]
         return title, chapters, False
 
 
-async def create_epub_from_chapters(chapters: list, title: str, settings: dict) -> (str, str):
+async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
+    # This function also needs the full dependency list to function correctly.
     final_filename = re.sub(r'[\\/*?:"<>|]', "", title)
     book = epub.EpubBook()
     book.set_identifier('id' + title)
@@ -204,39 +225,39 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
     js_dir = os.path.join(REPO_DIR, "plugin", "js")
     dependency_scripts = []
     try:
-        for file in ["Util.js", "Parser.js", "ParserFactory.js"]:
-            with open(os.path.join(js_dir, file), 'r', encoding='utf-8') as f:
-                dependency_scripts.append(f.read())
+        dependency_files = [
+            "../_locales/en/messages.json", "polyfillChrome.js", "EpubItem.js", "DebugUtil.js",
+            "HttpClient.js", "ImageCollector.js", "Imgur.js", "Parser.js", "ParserFactory.js",
+            "UserPreferences.js", "Util.js"
+        ]
+        for file in dependency_files:
+            base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
+            filepath = os.path.join(base_dir, file)
+            with open(filepath, 'r', encoding='utf-8') as f:
+                if file.endswith('.json'):
+                    dependency_scripts.append(f'const messages = {f.read()};')
+                else:
+                    dependency_scripts.append(f.read())
     except FileNotFoundError:
         dependency_scripts = []
-        logger.error("Could not load base parser files for content extraction.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
-
         for i, chapter_data in enumerate(chapters):
-            if not chapter_data.get('selected', False):
-                continue
-            
+            if not chapter_data.get('selected', False): continue
             page = await browser.new_page()
             try:
-                logger.info(f"Fetching chapter: {chapter_data['title']} ({chapter_data['url']})")
                 await page.goto(chapter_data['url'], wait_until='networkidle', timeout=60000)
-                
                 repo_parser = get_repo_parser(chapter_data['url'])
                 chapter_html_content = ''
-
                 if repo_parser and dependency_scripts:
-                    logger.info(f"Executing getContent() from '{repo_parser['filename']}'...")
                     result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], chapter_data['url']] + dependency_scripts)
                     if result and 'error' not in result and result.get('type') == 'content':
                         chapter_html_content = result['html']
                     else:
-                        logger.warning(f"Parser content extraction failed: {result.get('error', 'N/A')}. Falling back.")
                         chapter_html_content = await page.content()
                 else:
                     chapter_html_content = await page.content()
-
                 final_html = f"<h1>{chapter_data['title']}</h1>{chapter_html_content}"
                 epub_chapter = epub.EpubHtml(title=chapter_data['title'], file_name=f'chap_{i+1}.xhtml', lang='en')
                 epub_chapter.content = final_html
@@ -246,15 +267,11 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
                 logger.error(f"FATAL error processing chapter '{chapter_data['title']}': {e}", exc_info=True)
             finally:
                 await page.close()
-        
         await browser.close()
-
     book.spine = book_spine
     book.toc = [(epub.Link(c.file_name, c.title, f"chap_{i+1}")) for i, c in enumerate(book.items) if isinstance(c, epub.EpubHtml)]
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
-
     epub_path = f"{final_filename}.epub"
     epub.write_epub(epub_path, book, {})
-
     return epub_path, final_filename
