@@ -11,10 +11,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# --- Use the definitive path from the working build script ---
 CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
+# This JS runner now correctly loads ALL necessary dependencies first.
 PARSER_RUNNER_JS = """
 async ([parserScript, url, ...dependencyScripts]) => {
     try {
@@ -46,18 +48,26 @@ async ([parserScript, url, ...dependencyScripts]) => {
 async def update_parsers_from_github(sent_message):
     """
     Runs as a background task, providing progress updates by editing the message.
+    Crucially, runs blocking I/O (git) in a separate thread to prevent hanging.
     """
     try:
-        if os.path.exists(REPO_DIR):
-            repo = git.Repo(REPO_DIR)
-            origin = repo.remotes.origin
-            await sent_message.edit_text("Updating parsers... (Pulling latest changes)")
-            origin.pull()
-            logger.info("Pulled latest changes from WebToEpub repository.")
-        else:
-            await sent_message.edit_text("Updating parsers... (Cloning repository)")
-            git.Repo.clone_from(REPO_URL, REPO_DIR)
-            logger.info("Cloned WebToEpub repository.")
+        # --- THIS IS THE FIX FOR THE HANGING ---
+        # Run the blocking git operations in a separate thread.
+        def git_operations():
+            if os.path.exists(REPO_DIR):
+                logger.info("Git repo exists. Pulling latest changes...")
+                repo = git.Repo(REPO_DIR)
+                origin = repo.remotes.origin
+                origin.pull()
+                logger.info("Pulled latest changes from WebToEpub repository.")
+            else:
+                logger.info("Git repo does not exist. Cloning...")
+                git.Repo.clone_from(REPO_URL, REPO_DIR)
+                logger.info("Cloned WebToEpub repository.")
+        
+        await sent_message.edit_text("Updating parsers... (Accessing repository)")
+        await asyncio.to_thread(git_operations)
+        await sent_message.edit_text("Updating parsers... (Repository updated, preparing to scan files)")
 
         js_dir = os.path.join(REPO_DIR, "plugin", "js")
         parsers_dir = os.path.join(js_dir, "parsers")
@@ -77,12 +87,13 @@ async def update_parsers_from_github(sent_message):
             browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
             
             total_files = len(parser_files)
+            await sent_message.edit_text(f"Updating parsers... (Starting scan of {total_files} files)")
+            
             for i, filename in enumerate(parser_files):
-                # --- PROGRESS UPDATE LOGIC ---
-                if (i + 1) % 15 == 0: # Update every 15 files to avoid Telegram rate limits
+                if (i + 1) % 20 == 0: # Update every 20 files to avoid rate limits
                     try:
                         await sent_message.edit_text(f"Updating parsers... Scanned {i+1}/{total_files} files.")
-                        await asyncio.sleep(1) # Brief pause
+                        await asyncio.sleep(0.5)
                     except Exception as e:
                         logger.warning(f"Could not edit progress message: {e}")
 
@@ -125,7 +136,7 @@ async def update_parsers_from_github(sent_message):
             count = len(parsers_to_save)
             await sent_message.edit_text(f"✅ Parser update complete. Successfully saved {count} parsers.")
         else:
-            await sent_message.edit_text("ℹ️ Parser update finished, but no new parsers were found or saved.")
+            await sent_message.edit_text("ℹ️ Parser update finished, but no parsers were successfully scanned. Check logs for errors.")
             
     except Exception as e:
         logger.error("A critical error occurred during parser update:", exc_info=True)
