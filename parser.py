@@ -189,6 +189,8 @@ async def get_chapter_list(url: str, user_id: int):
                     logger.error(f"Parser '{repo_parser['filename']}' failed: {result.get('error', 'Unknown error')}")
             except FileNotFoundError as e:
                  logger.error(f"Could not find base parser dependency for get_chapter_list: {e.filename}", exc_info=True)
+                 # This exception should now be more visible and will not be caught by the generic fallback
+                 raise e
         
         logger.warning("No parser found or parser failed. Falling back to generic scraping.")
         html_content = await page.content()
