@@ -174,6 +174,7 @@ async def get_chapter_list(url: str, user_id: int):
             raise IOError(f"Failed to navigate to URL: {e}")
 
         if repo_parser:
+            # This 'try' block is now more specific and will re-raise critical errors
             try:
                 dependency_scripts = _load_dependency_scripts()
                 result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url] + dependency_scripts)
@@ -188,11 +189,15 @@ async def get_chapter_list(url: str, user_id: int):
                 else:
                     logger.error(f"Parser '{repo_parser['filename']}' failed: {result.get('error', 'Unknown error')}")
             except FileNotFoundError as e:
-                 logger.error(f"Could not find base parser dependency for get_chapter_list: {e.filename}", exc_info=True)
-                 # This exception should now be more visible and will not be caught by the generic fallback
+                 logger.error(f"CRITICAL: Could not find base parser dependency '{e.filename}' for get_chapter_list.", exc_info=True)
+                 # Re-raise the exception so it's not silently ignored
                  raise e
+            except Exception as e:
+                logger.error(f"An unexpected error occurred while using a specific parser.", exc_info=True)
+                raise e
+
         
-        logger.warning("No parser found or parser failed. Falling back to generic scraping.")
+        logger.warning("No specific parser was used. Falling back to generic scraping.")
         html_content = await page.content()
         await browser.close()
         soup = BeautifulSoup(html_content, 'html.parser')
