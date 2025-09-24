@@ -3,6 +3,4 @@ beautifulsoup4
 playwright
 ebooklib
 pymongo
-GitPython
 python-dotenv
-httpx
