@@ -56,10 +56,11 @@ async ([parserScript, url]) => {
 }
 """
 
+# --- THIS IS THE NEW, ROBUST PARSER UPDATE LOGIC ---
 async def update_parsers_from_github():
     """
-    Clones/pulls the repo and robustly scans every parser file to extract the domains
-    it registers, storing this mapping in the database.
+    Clones/pulls the repo and uses a headless browser to reliably extract the
+    domains each parser registers.
     """
     if os.path.exists(REPO_DIR):
         repo = git.Repo(REPO_DIR)
@@ -72,45 +73,69 @@ async def update_parsers_from_github():
 
     parsers_dir = os.path.join(REPO_DIR, "plugin", "js", "parsers")
     if not os.path.isdir(parsers_dir):
+        logger.error("Parsers directory not found after git operation.")
         return 0
         
     parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js')]
-    
     parsers_to_save = []
-    # --- THIS IS THE FIX ---
-    # This new, more robust regex correctly handles single domains, multiple domains,
-    # and different quote styles (single or double).
-    domain_regex = re.compile(r'parserFactory\.register\(([^,]+),')
+    
+    # This JS snippet will be injected into the browser to capture the domains
+    interrogator_js = """
+    (parserScript) => {
+        let registeredDomains = [];
+        const parserFactory = {
+            register: (domains, parser) => {
+                if (typeof domains === 'string') {
+                    registeredDomains.push(domains);
+                } else if (Array.isArray(domains)) {
+                    registeredDomains.push(...domains);
+                }
+            }
+        };
+        try {
+            eval(parserScript);
+            return registeredDomains;
+        } catch (e) {
+            return { error: e.toString() };
+        }
+    }
+    """
 
-    for filename in parser_files:
-        filepath = os.path.join(parsers_dir, filename)
-        with open(filepath, 'r', encoding='utf-8') as f:
-            content = f.read()
-            match = domain_regex.search(content)
-            if match:
-                # The matched group is the raw domain list, e.g., '["a.com", "b.com"]' or '"c.com"'
-                raw_domains = match.group(1).strip()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
+        page = await browser.new_page()
+
+        for filename in parser_files:
+            filepath = os.path.join(parsers_dir, filename)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
                 
-                # Clean up the string to make it a valid list of domains
-                # This removes brackets, quotes, and splits by comma
-                cleaned_domains = raw_domains.strip('[]').replace('"', '').replace("'", "")
-                domains = [d.strip() for d in cleaned_domains.split(',') if d.strip()]
-                
-                if domains:
+                # Use the browser to execute the script and get the domains
+                domains = await page.evaluate(interrogator_js, content)
+
+                if domains and not isinstance(domains, dict): # Check it's not an error object
                     parsers_to_save.append({
                         "filename": filename,
                         "domains": domains,
                         "script": content
                     })
+                elif isinstance(domains, dict) and 'error' in domains:
+                     logger.warning(f"JS error while parsing {filename}: {domains['error']}")
                 else:
-                    logger.warning(f"Could not extract any domains from matched string '{raw_domains}' in {filename}")
-            else:
-                 logger.warning(f"No domain registration found in {filename}")
+                    logger.warning(f"No domains found or returned for {filename}")
 
+            except Exception as e:
+                logger.error(f"Failed to process parser file {filename}: {e}")
+        
+        await browser.close()
 
     if parsers_to_save:
         save_parsers_from_repo(parsers_to_save)
         logger.info(f"Successfully saved {len(parsers_to_save)} parsers to the database.")
+    else:
+        logger.error("Parser update process finished, but no parsers were saved.")
+
     return len(parsers_to_save)
 
 
