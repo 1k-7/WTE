@@ -1,8 +1,8 @@
 import pymongo
 import os
-import re
 from urllib.parse import urlparse
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -83,45 +83,59 @@ def get_repo_parser(url):
         hostname = hostname.lower()
         logger.info(f"Searching for parser for hostname: {hostname}")
 
-        # 1. Exact match first for performance
-        logger.info(f"Attempting exact match for: {hostname}")
+        # Efficiently query for all potential matches using a regex that covers subdomains
+        # This regex will match domains like 'www.example.com', 'm.example.com' if 'example.com' is in the database.
+        # It will also match 'example.com' if 'www.example.com' is given.
+        
+        # To make it more robust, we will create a regex that matches any subdomain of the given hostname.
+        # For example, if the hostname is "www.wuxiaworld.com", we create a regex that matches
+        # "wuxiaworld.com", "www.wuxiaworld.com", "anything.wuxiaworld.com", etc.
+        
+        # We also need to handle cases where the database stores "wuxiaworld.com" and the user provides
+        # "www.wuxiaworld.com" or "m.wuxiaworld.com"
+        
+        # We'll try a few strategies, from most specific to most general.
+        
+        # 1. Exact match
         parser = repo_parsers_collection.find_one({"domains": hostname})
         if parser:
-            logger.info(f"Found exact match: {parser['filename']}")
+            logger.info(f"Found exact match for {hostname}: {parser['filename']}")
             return parser
-
-        # 2. Regex match for subdomains and parent domains
-        # This will match domains like 'www.example.com', 'm.example.com' if 'example.com' is in the database.
-        # It will also match 'example.com' if 'www.example.com' is given.
-        parts = hostname.split('.')
-        domain_variants = [hostname]
+            
+        # 2. Match without "www." if it exists
         if hostname.startswith("www."):
-            domain_variants.append(hostname[4:])
+            parser = repo_parsers_collection.find_one({"domains": hostname[4:]})
+            if parser:
+                logger.info(f"Found match for {hostname[4:]}: {parser['filename']}")
+                return parser
+
+        # 3. Match with "www." if it does not exist
         else:
-            domain_variants.append(f"www.{hostname}")
-        
+            parser = repo_parsers_collection.find_one({"domains": f"www.{hostname}"})
+            if parser:
+                logger.info(f"Found match for www.{hostname}: {parser['filename']}")
+                return parser
+
+        # 4. Check for parent domain matches.
+        # For example, if the hostname is "m.wuxiaworld.com", this will check for "wuxiaworld.com"
+        parts = hostname.split('.')
         if len(parts) > 2:
             for i in range(1, len(parts) - 1):
                 parent_domain = '.'.join(parts[i:])
-                domain_variants.append(parent_domain)
-                if not parent_domain.startswith("www."):
-                    domain_variants.append(f"www.{parent_domain}")
-
-        # Create a list of regex patterns to try
-        regex_patterns = []
-        for variant in set(domain_variants):
-            # regex to match the domain, and any subdomains
-            regex_patterns.append(f"^(www\\.)?{re.escape(variant.replace('www.',''))}$")
-
-        logger.info(f"Attempting regex match with patterns: {regex_patterns}")
-
-        for pattern in regex_patterns:
-            # Using $regex operator in pymongo
-            parser = repo_parsers_collection.find_one({"domains": {"$regex": pattern, "$options": "i"}})
-            if parser:
-                logger.info(f"Found regex match with pattern '{pattern}': {parser['filename']}")
-                return parser
+                parser = repo_parsers_collection.find_one({"domains": parent_domain})
+                if parser:
+                    logger.info(f"Found parent domain match for {parent_domain}: {parser['filename']}")
+                    return parser
         
+        # 5. Final attempt with a more general regex
+        # This is a bit of a catch-all, but it might help in some cases.
+        # This will match any parser where the domain is a substring of the hostname.
+        escaped_hostname = re.escape(hostname)
+        parser = repo_parsers_collection.find_one({"domains": {"$regex": f".*{escaped_hostname}.*"}})
+        if parser:
+            logger.info(f"Found regex substring match for {hostname}: {parser['filename']}")
+            return parser
+
         logger.warning(f"No parser found for hostname: {hostname}")
 
     except Exception as e:
