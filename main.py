@@ -1,9 +1,8 @@
 import logging
 import os
-import json
 import asyncio
 import re
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
     CallbackContext, CallbackQueryHandler, ConversationHandler
@@ -56,23 +55,21 @@ async def settings_command(update: Update, context: CallbackContext) -> None:
     reply_markup, message = await get_main_settings_menu(user_id)
     await update.message.reply_text(message, reply_markup=reply_markup)
 
+# --- THIS IS THE NEW, NON-BLOCKING UPDATE COMMAND WITH PROGRESS ---
 async def update_parsers_command(update: Update, context: CallbackContext) -> None:
-    """Update parsers from the GitHub repository."""
-    await update.message.reply_text("Updating parsers... This may take a moment.")
-    try:
-        count = await update_parsers_from_github()
-        await update.message.reply_text(f"Successfully updated {count} parsers.")
-    except Exception as e:
-        logger.error(f"Error updating parsers: {e}", exc_info=True)
-        await update.message.reply_text(f"An error occurred while updating parsers: {e}")
+    """Starts the parser update process in the background and provides progress."""
+    sent_message = await update.message.reply_text("Parser update started... This may take several minutes.")
+    
+    # Run the long-running task in the background, passing the message to be edited
+    asyncio.create_task(update_parsers_from_github(sent_message))
 
-# --- THIS IS THE NEW COMMAND HANDLER ---
+
 async def clean_parsers_command(update: Update, context: CallbackContext) -> None:
     """Clears the repository parsers from the database."""
     await update.message.reply_text("Cleaning parser database...")
     try:
         deleted_count = clean_repo_parsers()
-        await update.message.reply_text(f"Successfully deleted {deleted_count} parsers from the database. You can now run /update_parser to get a fresh copy.")
+        await update.message.reply_text(f"Successfully deleted {deleted_count} parsers. You can now run /update_parser.")
     except Exception as e:
         logger.error(f"Error cleaning parsers: {e}", exc_info=True)
         await update.message.reply_text("An error occurred while cleaning the parser database.")
@@ -117,9 +114,10 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
-# --- Chapter Selection and EPUB Creation ---
+# --- Chapter Selection and EPUB Creation (No changes needed below this line in this file) ---
 
 async def build_chapter_selection_keyboard(chapters, page=0, page_size=10):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     keyboard = []
     start_index = page * page_size
     end_index = start_index + page_size
@@ -162,8 +160,7 @@ async def chapter_selection_callback(update: Update, context: CallbackContext):
     
     action, _, data = query.data.partition('_')
     chapters = context.user_data.get('chapters', [])
-    page = context.user_data.get('page', 0)
-
+    
     if action == 'toggle':
         chapter_index = int(data)
         chapters[chapter_index]['selected'] = not chapters[chapter_index].get('selected', True)
@@ -218,9 +215,6 @@ async def process_chapters_to_epub(update: Update, context: CallbackContext, cha
 
 
 async def epub_command(update: Update, context: CallbackContext) -> int:
-    """
-    Entry point for the EPUB creation process.
-    """
     url = ""
     replied_message = update.message.reply_to_message
 
@@ -251,11 +245,11 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
         context.user_data['page'] = 0
         
         if len(chapters) == 1 and not parser_found:
-            await update.message.reply_text("Single chapter/page detected. Processing directly...")
             await process_chapters_to_epub(update, context, chapters)
             return ConversationHandler.END
         
         if not parser_found:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             keyboard = [[
                 InlineKeyboardButton("Yes, proceed", callback_data="default_parser_yes"),
                 InlineKeyboardButton("No, cancel", callback_data="default_parser_no"),
@@ -280,9 +274,7 @@ async def handle_default_parser_choice(update: Update, context: CallbackContext)
     await query.answer()
 
     if query.data == 'default_parser_yes':
-        chapters = context.user_data['chapters']
-        title = context.user_data['title']
-        await display_chapter_selection(update, context, f"Proceeding with generic conversion. Found {len(chapters)} chapters for '{title}'. Please select which to include:")
+        await display_chapter_selection(update, context, f"Proceeding with generic conversion...")
         return CHAPTER_SELECTION
     else:
         await query.edit_message_text("Operation cancelled.")
@@ -290,9 +282,7 @@ async def handle_default_parser_choice(update: Update, context: CallbackContext)
         return ConversationHandler.END
 
 # --- Main Application Setup ---
-
 def main() -> None:
-    """Start the bot using webhooks for deployment as a web service."""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     epub_conversation_handler = ConversationHandler(
@@ -306,7 +296,6 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel)],
         conversation_timeout=600
     )
-
     add_parser_handler = ConversationHandler(
         entry_points=[CommandHandler('add_parser', add_parser_start)],
         states={
@@ -315,7 +304,6 @@ def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
-
     set_setting_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(handle_settings_callback, pattern='^set_')],
         states={SETTING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_setting_value_input)]},
@@ -326,7 +314,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("update_parsers", update_parsers_command))
-    application.add_handler(CommandHandler("cleanparsers", clean_parsers_command)) # Add the new command
+    application.add_handler(CommandHandler("cleanparsers", clean_parsers_command))
     application.add_handler(add_parser_handler)
     application.add_handler(epub_conversation_handler)
     application.add_handler(CallbackQueryHandler(handle_settings_callback, pattern='^(toggle_|goto_|back_to_)'))
