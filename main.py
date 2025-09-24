@@ -236,8 +236,21 @@ async def handle_default_parser_choice(update: Update, context: CallbackContext)
         return ConversationHandler.END
 
 # --- Main Application Setup ---
+async def on_startup(application: Application):
+    """
+    Ensures the parser database is populated when the bot starts.
+    """
+    logger.info("Application starting up, running parser database update...")
+    # Run the update function without a message object. It will log to console.
+    await update_parsers_from_github()
+    logger.info("Startup parser update finished.")
+
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Run the startup routine before webhook or polling starts
+    application.post_init = on_startup
+
     # Add all command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
