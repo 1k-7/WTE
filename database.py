@@ -95,4 +95,4 @@ def get_repo_parser(url):
     except Exception as e:
         logger.error(f"Error finding repo parser for {url}: {e}")
     
-    return parser
+    return None
