@@ -45,10 +45,8 @@ async def start(update: Update, context: CallbackContext) -> None:
         'Welcome to the WebToEpub Bot!\n\n'
         'Use /epub <url> to convert a page.\n'
         'Use /settings to configure options.\n'
-        'Use /update_parsers to fetch all parsers.\n'
-        'Use /load <number> to fetch a specific number of parsers for testing.\n'
-        'Use /cleanparsers to clear the parser database.\n'
-        'Use /add_parser to add a custom parser.'
+        'Use /update_parsers to fetch the latest parsers.\n'
+        'Use /cleanparsers to clear the parser database.'
     )
 
 async def settings_command(update: Update, context: CallbackContext) -> None:
@@ -57,29 +55,19 @@ async def settings_command(update: Update, context: CallbackContext) -> None:
     reply_markup, message = await get_main_settings_menu(user_id)
     await update.message.reply_text(message, reply_markup=reply_markup)
 
-# --- REWORKED UPDATE COMMANDS ---
+# --- Parser Update Commands ---
 
 async def update_parsers_command(update: Update, context: CallbackContext) -> None:
     """Starts the full parser update process in the background."""
     sent_message = await update.message.reply_text("Parser update started... This may take several minutes.")
     asyncio.create_task(update_parsers_from_github(sent_message))
 
-async def load_parsers_command(update: Update, context: CallbackContext) -> None:
-    """Starts a partial parser update process for testing."""
-    try:
-        limit = int(context.args[0])
-        sent_message = await update.message.reply_text(f"Starting partial parser load of {limit} files...")
-        asyncio.create_task(update_parsers_from_github(sent_message, limit=limit))
-    except (IndexError, ValueError):
-        await update.message.reply_text("Usage: /load <number>")
-
-
 async def clean_parsers_command(update: Update, context: CallbackContext) -> None:
     """Clears the repository parsers from the database."""
     await update.message.reply_text("Cleaning parser database...")
     try:
         deleted_count = clean_repo_parsers()
-        await update.message.reply_text(f"Successfully deleted {deleted_count} parsers. You can now run /update_parsers or /load.")
+        await update.message.reply_text(f"Successfully deleted {deleted_count} parsers. You can now run /update_parsers.")
     except Exception as e:
         logger.error(f"Error cleaning parsers: {e}", exc_info=True)
         await update.message.reply_text("An error occurred while cleaning the parser database.")
@@ -121,7 +109,7 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
-# --- Chapter Selection and EPUB Creation (No changes) ---
+# --- Chapter Selection and EPUB Creation ---
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 async def build_chapter_selection_keyboard(chapters, page=0, page_size=10):
@@ -236,26 +224,13 @@ async def handle_default_parser_choice(update: Update, context: CallbackContext)
         return ConversationHandler.END
 
 # --- Main Application Setup ---
-async def on_startup(application: Application):
-    """
-    Schedules the parser update to run in the background so the bot can start immediately.
-    """
-    logger.info("Application starting up, scheduling parser database update...")
-    # Run the update function as a background task so it doesn't block startup
-    asyncio.create_task(update_parsers_from_github())
-    logger.info("Startup complete. Parser update is running in the background.")
-
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Run the startup routine before webhook or polling starts
-    application.post_init = on_startup
-
     # Add all command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("update_parsers", update_parsers_command))
-    application.add_handler(CommandHandler("load", load_parsers_command))
     application.add_handler(CommandHandler("cleanparsers", clean_parsers_command))
     # Conversation handlers
     application.add_handler(ConversationHandler(
