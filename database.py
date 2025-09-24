@@ -31,15 +31,12 @@ def set_user_setting(user_id, key, value):
     )
 
 # --- Parser Functions ---
-def save_parsers_from_repo(parsers_data, clean_first=False):
+def save_parsers_from_repo(parsers_data):
     """
-    Saves a list of parsers to the database.
-    Can optionally clean the collection before inserting.
+    Saves a list of parsers to the database incrementally.
     """
     if not parsers_data:
         return 0
-    if clean_first:
-        repo_parsers_collection.delete_many({})
     
     # Use update_one with upsert to prevent duplicates if a parser is re-scanned
     from pymongo import UpdateOne
@@ -98,4 +95,4 @@ def get_repo_parser(url):
     except Exception as e:
         logger.error(f"Error finding repo parser for {url}: {e}")
     
-    return None
+    return parser
