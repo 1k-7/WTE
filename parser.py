@@ -11,31 +11,48 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# --- Use the definitive path from the working build script ---
 CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
+# This JS runner now correctly loads ALL necessary dependencies first.
 PARSER_RUNNER_JS = """
 async ([parserScript, url, ...dependencyScripts]) => {
     try {
         let activeParserInstance = null;
+        
+        // --- PREPARE THE FULL ENVIRONMENT ---
+        // The parser files are not standalone. They depend on these core scripts.
         for (const script of dependencyScripts) {
             eval(script);
         }
+
+        // parserFactory is now defined, so this will work.
         parserFactory.register = (domains, parser) => {
             activeParserInstance = new parser(url, document);
         };
+
+        // Now execute the actual parser script
         eval(parserScript);
 
         if (activeParserInstance) {
             const parser = activeParserInstance;
+            
             if (parser.isChapterUrl && parser.isChapterUrl(url)) {
                  const contentElement = await parser.getContent();
-                 return { type: 'content', html: contentElement.innerHTML };
+                 return {
+                    type: 'content',
+                    html: contentElement.innerHTML
+                 };
             } else {
                 const chapters = await parser.getChapters();
                 const novelTitle = parser.getNovelTitle ? parser.getNovelTitle() : document.title;
-                return { type: 'chapters', title: novelTitle, chapters: chapters.map(ch => ({ title: ch.title, url: ch.url })) };
+                return {
+                    type: 'chapters',
+                    title: novelTitle,
+                    chapters: chapters.map(ch => ({ title: ch.title, url: ch.url }))
+                };
             }
         }
         return { error: 'No parser was registered or activated by the script.' };
@@ -46,6 +63,11 @@ async ([parserScript, url, ...dependencyScripts]) => {
 """
 
 async def update_parsers_from_github():
+    """
+    Clones/pulls the repo and uses a local HTML file to create a browser
+    environment that perfectly mimics the extension, guaranteeing reliable
+    parser domain extraction.
+    """
     if os.path.exists(REPO_DIR):
         repo = git.Repo(REPO_DIR)
         origin = repo.remotes.origin
@@ -77,12 +99,18 @@ async def update_parsers_from_github():
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
-        page = await browser.new_page()
-
-        for filename in parser_files:
-            filepath = os.path.join(parsers_dir, filename)
+        
+        # --- THIS IS THE FIX ---
+        # Instead of reusing one page, we create a fresh one for each parser.
+        
+        total_files = len(parser_files)
+        for i, filename in enumerate(parser_files):
+            # Create a new, clean page for each iteration to prevent resource leaks
+            page = await browser.new_page()
+            logger.info(f"Processing parser {i+1}/{total_files}: {filename}")
+            
             try:
-                with open(filepath, 'r', encoding='utf-8') as f:
+                with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
                     parser_script = f.read()
                 
                 html_content = f"""
@@ -102,15 +130,18 @@ async def update_parsers_from_github():
                 """
                 
                 data_url = f"data:text/html,{quote(html_content)}"
-                await page.goto(data_url)
+                await page.goto(data_url, timeout=10000) # Add a timeout
+                
                 domains = await page.evaluate("() => window.registeredDomains")
 
                 if isinstance(domains, list) and domains:
                     parsers_to_save.append({ "filename": filename, "domains": domains, "script": parser_script })
-                else:
-                     logger.warning(f"No domains were registered by {filename}")
+                
             except Exception as e:
                 logger.error(f"Failed to process parser file {filename}: {e}", exc_info=True)
+            finally:
+                # Crucially, close the page to release its resources
+                await page.close()
         
         await browser.close()
 
@@ -119,7 +150,9 @@ async def update_parsers_from_github():
         logger.info(f"Successfully saved {len(parsers_to_save)} parsers to the database.")
     else:
         logger.error("Parser update process finished, but no parsers were saved.")
+
     return len(parsers_to_save)
+
 
 async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
     if not os.path.exists(CHROME_EXECUTABLE_PATH):
@@ -147,6 +180,7 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
                 result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url] + dependency_scripts)
                 
                 if result and 'error' not in result and result.get('type') == 'chapters':
+                    await page.close()
                     await browser.close()
                     logger.info(f"Parser successfully extracted {len(result['chapters'])} chapters.")
                     chapters = result['chapters']
@@ -161,6 +195,7 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
         
         logger.warning("No parser found or parser failed. Falling back to generic scraping.")
         html_content = await page.content()
+        await page.close()
         await browser.close()
         soup = BeautifulSoup(html_content, 'html.parser')
         title = (soup.find('title').string or 'Untitled').strip()
@@ -170,6 +205,7 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
         if not chapters:
             chapters = [{'title': "Full Page Content", 'url': url, 'selected': True}]
         return title, chapters, False
+
 
 async def create_epub_from_chapters(chapters: list, title: str, settings: dict) -> (str, str):
     final_filename = re.sub(r'[\\/*?:"<>|]', "", title)
@@ -192,11 +228,12 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
-        page = await browser.new_page()
 
         for i, chapter_data in enumerate(chapters):
             if not chapter_data.get('selected', False):
                 continue
+            
+            page = await browser.new_page()
             try:
                 logger.info(f"Fetching chapter: {chapter_data['title']} ({chapter_data['url']})")
                 await page.goto(chapter_data['url'], wait_until='networkidle', timeout=60000)
@@ -222,7 +259,8 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
                 book_spine.append(epub_chapter)
             except Exception as e:
                 logger.error(f"FATAL error processing chapter '{chapter_data['title']}': {e}", exc_info=True)
-                continue
+            finally:
+                await page.close()
         
         await browser.close()
 
@@ -233,4 +271,5 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict) 
 
     epub_path = f"{final_filename}.epub"
     epub.write_epub(epub_path, book, {})
+
     return epub_path, final_filename
