@@ -122,7 +122,7 @@ async def update_parsers_from_github(sent_message):
                 total_saved_count += saved_in_batch
                 await sent_message.edit_text(f"Updating parsers... (Saved {total_saved_count}/{total_files} parsers so far)")
                 if i == 0 and saved_in_batch == 0:
-                     await sent_message.edit_text("❌ First batch failed to save any parsers. The update process is flawed.")
+                     await sent_message.edit_text("❌ First batch failed to save any parsers. The update process is flawed. Please check logs.")
                      return
             await asyncio.sleep(1)
 
