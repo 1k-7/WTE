@@ -40,7 +40,7 @@ async ([parserScript, url, ...dependencyScripts]) => {
         }
         return { error: 'No parser was registered or activated.' };
     } catch (error) {
-        return { error: `JavaScript execution failed: ${error.toString()}` };
+        return { error: `JS execution failed: ${error.toString()}` };
     }
 }
 """
@@ -94,7 +94,9 @@ async def update_parsers_from_github(sent_message):
                 for filename in batch:
                     current_index = i + batch.index(filename)
                     try:
-                        await sent_message.edit_text(f"Updating parsers... Scanned {current_index + 1}/{total_files} files.")
+                        # Update progress message more frequently
+                        if (current_index + 1) % 5 == 0:
+                           await sent_message.edit_text(f"Updating parsers... Scanned {current_index + 1}/{total_files} files.")
                         
                         with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
                             parser_script = f.read()
@@ -116,18 +118,16 @@ async def update_parsers_from_github(sent_message):
                         """
                         
                         data_url = f"data:text/html,{quote(html_content)}"
-                        # Aggressive timeout for each file
                         await page.goto(data_url, timeout=10000, wait_until='domcontentloaded')
                         domains = await page.evaluate("() => window.registeredDomains")
 
                         if isinstance(domains, list) and domains:
                             parsers_to_save.append({ "filename": filename, "domains": domains, "script": parser_script })
                     except Exception as e:
-                        logger.error(f"Failed to process {filename}: {e}", exc_info=False) # Keep logs clean
+                        logger.error(f"Failed to process {filename}: {e}", exc_info=False)
                 
-                # Cleanly close browser after each batch
                 await browser.close()
-            await asyncio.sleep(1) # Small pause between batches
+            await asyncio.sleep(1)
 
         if parsers_to_save:
             save_parsers_from_repo(parsers_to_save)
