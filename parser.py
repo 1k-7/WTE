@@ -42,6 +42,43 @@ async ([parserScript, url, ...dependencyScripts]) => {
 }
 """
 
+def _load_dependency_scripts(as_dict=False):
+    """
+    Loads all dependency scripts from the repository with robust path handling.
+    """
+    js_dir = os.path.join(REPO_DIR, "plugin", "js")
+    plugin_dir = os.path.join(REPO_DIR, "plugin")
+    unittest_dir = os.path.join(REPO_DIR, "unitTest")
+
+    # Define files and their correct base directories
+    dependency_map = {
+        "../_locales/en/messages.json": plugin_dir,
+        "polyfillChrome.js": unittest_dir,
+        "EpubItem.js": js_dir, "DebugUtil.js": js_dir, "HttpClient.js": js_dir,
+        "ImageCollector.js": js_dir, "Imgur.js": js_dir, "Parser.js": js_dir,
+        "ParserFactory.js": js_dir, "UserPreferences.js": js_dir, "Util.js": js_dir,
+    }
+
+    scripts = {} if as_dict else []
+    for file, base_dir in dependency_map.items():
+        # Construct the path safely, handling the '..' case explicitly
+        path_segments = file.replace('../', '').split('/')
+        filepath = os.path.join(base_dir, *path_segments)
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if file.endswith('.json'):
+                script_content = f'const messages = {content};'
+            else:
+                script_content = content
+            
+            if as_dict:
+                scripts[file] = script_content
+            else:
+                scripts.append(script_content)
+    return scripts
+
+
 async def update_parsers_from_github(sent_message, limit=None):
     total_saved_count = 0
     try:
@@ -58,20 +95,7 @@ async def update_parsers_from_github(sent_message, limit=None):
         parsers_dir = os.path.join(js_dir, "parsers")
         if not os.path.isdir(parsers_dir): raise FileNotFoundError("Parsers directory not found.")
             
-        dependency_files = [
-            "../_locales/en/messages.json", "polyfillChrome.js", "EpubItem.js", "DebugUtil.js",
-            "HttpClient.js", "ImageCollector.js", "Imgur.js", "Parser.js", "ParserFactory.js",
-            "UserPreferences.js", "Util.js"
-        ]
-        dependency_scripts = {}
-        for file in dependency_files:
-            base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
-            filepath = os.path.normpath(os.path.join(base_dir, file))
-            with open(filepath, 'r', encoding='utf-8') as f:
-                if file.endswith('.json'):
-                    dependency_scripts[file] = f'const messages = {f.read()};'
-                else:
-                    dependency_scripts[file] = f.read()
+        dependency_scripts = _load_dependency_scripts(as_dict=True)
 
         parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js') and f != "Template.js"]
         if limit:
@@ -134,7 +158,6 @@ async def update_parsers_from_github(sent_message, limit=None):
         logger.error("A critical error occurred during parser update:", exc_info=True)
         await sent_message.edit_text(f"❌ Parser update failed with a critical error: {e}")
 
-# --- No changes needed to the functions below ---
 
 async def get_chapter_list(url: str, user_id: int):
     if not os.path.exists(CHROME_EXECUTABLE_PATH):
@@ -151,23 +174,8 @@ async def get_chapter_list(url: str, user_id: int):
             raise IOError(f"Failed to navigate to URL: {e}")
 
         if repo_parser:
-            js_dir = os.path.join(REPO_DIR, "plugin", "js")
             try:
-                dependency_scripts = []
-                dependency_files = [
-                    "../_locales/en/messages.json", "polyfillChrome.js", "EpubItem.js", "DebugUtil.js",
-                    "HttpClient.js", "ImageCollector.js", "Imgur.js", "Parser.js", "ParserFactory.js",
-                    "UserPreferences.js", "Util.js"
-                ]
-                for file in dependency_files:
-                    base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
-                    filepath = os.path.normpath(os.path.join(base_dir, file))
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        if file.endswith('.json'):
-                            dependency_scripts.append(f'const messages = {f.read()};')
-                        else:
-                            dependency_scripts.append(f.read())
-                
+                dependency_scripts = _load_dependency_scripts()
                 result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url] + dependency_scripts)
                 
                 if result and 'error' not in result and result.get('type') == 'chapters':
@@ -180,7 +188,7 @@ async def get_chapter_list(url: str, user_id: int):
                 else:
                     logger.error(f"Parser '{repo_parser['filename']}' failed: {result.get('error', 'Unknown error')}")
             except FileNotFoundError as e:
-                 logger.error(f"Could not find base parser dependency for get_chapter_list: {e.filename}")
+                 logger.error(f"Could not find base parser dependency for get_chapter_list: {e.filename}", exc_info=True)
         
         logger.warning("No parser found or parser failed. Falling back to generic scraping.")
         html_content = await page.content()
@@ -203,23 +211,11 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
     book.add_author('WebToEpub Bot')
     book_spine = ['nav']
     
-    js_dir = os.path.join(REPO_DIR, "plugin", "js")
     dependency_scripts = []
     try:
-        dependency_files = [
-            "../_locales/en/messages.json", "polyfillChrome.js", "EpubItem.js", "DebugUtil.js",
-            "HttpClient.js", "ImageCollector.js", "Imgur.js", "Parser.js", "ParserFactory.js",
-            "UserPreferences.js", "Util.js"
-        ]
-        for file in dependency_files:
-            base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
-            filepath = os.path.normpath(os.path.join(base_dir, file))
-            with open(filepath, 'r', encoding='utf-8') as f:
-                if file.endswith('.json'):
-                    dependency_scripts.append(f'const messages = {f.read()};')
-                else:
-                    dependency_scripts.append(f.read())
+        dependency_scripts = _load_dependency_scripts()
     except FileNotFoundError:
+        logger.error("Could not load dependency scripts for EPUB creation.", exc_info=True)
         dependency_scripts = []
 
     async with async_playwright() as p:
