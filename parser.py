@@ -16,8 +16,7 @@ CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/g
 REPO_URL = "https://github.com/dteviot/WebToEpub.git"
 REPO_DIR = "webtoepub_repo"
 
-# This JS code is a helper to load and execute the external parser scripts
-# inside the browser's context.
+# This JS runner now correctly loads all necessary dependencies first.
 PARSER_RUNNER_JS = """
 async ([parserScript, url, baseParserScript, utilScript]) => {
     try {
@@ -63,7 +62,6 @@ async ([parserScript, url, baseParserScript, utilScript]) => {
 }
 """
 
-# --- THIS IS THE NEW, ROBUST PARSER UPDATE LOGIC ---
 async def update_parsers_from_github():
     """
     Clones/pulls the repo and uses a headless browser with the correct dependencies
@@ -84,7 +82,8 @@ async def update_parsers_from_github():
         logger.error("Parsers directory not found after git operation.")
         return 0
         
-    # --- Load required dependency scripts ---
+    # --- THIS IS THE CRITICAL FIX ---
+    # Load required dependency scripts that all parsers rely on.
     try:
         with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
             base_parser_script = f.read()
@@ -94,13 +93,14 @@ async def update_parsers_from_github():
         logger.error(f"FATAL: Could not find base parser dependencies: {e}")
         return 0
 
-    parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js')]
+    parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js') and f != "Template.js"]
     parsers_to_save = []
     
+    # This script runs in the browser to interrogate each parser file.
     interrogator_js = """
     async ([parserScript, baseParserScript, utilScript]) => {
         let registeredDomains = [];
-        // Mock the environment
+        // Create the environment the parser expects.
         eval(utilScript);
         eval(baseParserScript);
         
@@ -115,6 +115,7 @@ async def update_parsers_from_github():
         };
 
         try {
+            // Execute the specific parser file.
             eval(parserScript);
             return registeredDomains;
         } catch (e) {
@@ -133,7 +134,7 @@ async def update_parsers_from_github():
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read()
                 
-                # Use the browser to execute the script with its dependencies and get the domains
+                # Execute the interrogator, passing in the parser and its dependencies.
                 domains = await page.evaluate(interrogator_js, [content, base_parser_script, util_script])
 
                 if isinstance(domains, list) and domains:
@@ -183,23 +184,26 @@ async def get_chapter_list(url: str, user_id: int) -> (str, list, bool):
         if repo_parser:
             logger.info(f"Executing parser '{repo_parser['filename']}' for {url}")
             js_dir = os.path.join(REPO_DIR, "plugin", "js")
-            with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
-                base_parser_script = f.read()
-            with open(os.path.join(js_dir, "Util.js"), 'r', encoding='utf-8') as f:
-                util_script = f.read()
-
-            result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url, base_parser_script, util_script])
-            
-            if result and 'error' not in result and result.get('type') == 'chapters':
-                await browser.close()
-                logger.info(f"Parser successfully extracted {len(result['chapters'])} chapters.")
-                chapters = result['chapters']
-                for chapter in chapters:
-                    chapter['url'] = urljoin(url, chapter['url']) # Ensure URLs are absolute
-                    chapter['selected'] = True
-                return result['title'], chapters, True
-            else:
-                logger.error(f"Parser '{repo_parser['filename']}' failed: {result.get('error', 'Unknown error')}")
+            try:
+                with open(os.path.join(js_dir, "Parser.js"), 'r', encoding='utf-8') as f:
+                    base_parser_script = f.read()
+                with open(os.path.join(js_dir, "Util.js"), 'r', encoding='utf-8') as f:
+                    util_script = f.read()
+                
+                result = await page.evaluate(PARSER_RUNNER_JS, [repo_parser['script'], url, base_parser_script, util_script])
+                
+                if result and 'error' not in result and result.get('type') == 'chapters':
+                    await browser.close()
+                    logger.info(f"Parser successfully extracted {len(result['chapters'])} chapters.")
+                    chapters = result['chapters']
+                    for chapter in chapters:
+                        chapter['url'] = urljoin(url, chapter['url']) # Ensure URLs are absolute
+                        chapter['selected'] = True
+                    return result['title'], chapters, True
+                else:
+                    logger.error(f"Parser '{repo_parser['filename']}' failed: {result.get('error', 'Unknown error')}")
+            except FileNotFoundError:
+                 logger.error("Could not find base parser files for get_chapter_list.")
 
         # --- GENERIC FALLBACK ---
         logger.warning("No parser found or parser failed. Falling back to generic scraping.")
