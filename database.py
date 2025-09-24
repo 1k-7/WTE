@@ -13,7 +13,6 @@ user_settings_collection = db['user_settings']
 repo_parsers_collection = db['repo_parsers']
 custom_parsers_collection = db['custom_parsers']
 
-# --- New, more effective index ---
 repo_parsers_collection.create_index([("domains", pymongo.ASCENDING)])
 custom_parsers_collection.create_index([("user_id", pymongo.ASCENDING), ("target_url", pymongo.ASCENDING)])
 
@@ -36,12 +35,19 @@ def save_parsers_from_repo(parsers_data):
     """Saves a list of parsers and their registered domains to the database."""
     if not parsers_data:
         return
+    # Use a bulk write operation for efficiency
     repo_parsers_collection.delete_many({})
     repo_parsers_collection.insert_many(parsers_data)
-    
+
 def get_parser_count():
     """Returns the number of parsers loaded from the repository."""
     return repo_parsers_collection.count_documents({})
+
+# --- THIS IS THE NEW COMMAND YOU REQUESTED ---
+def clean_repo_parsers():
+    """Deletes all parsers from the repository collection."""
+    result = repo_parsers_collection.delete_many({})
+    return result.deleted_count
 
 def add_custom_parser(user_id, target_url, script_content):
     """Adds or updates a custom parser for a user."""
@@ -58,21 +64,18 @@ def get_custom_parser(user_id, url):
 def get_repo_parser(url):
     """
     Finds the correct parser by matching the URL's domain against the
-    'domains' array stored in the database. This mimics the extension's logic.
+    'domains' array stored in the database.
     """
     try:
         hostname = urlparse(url).hostname
         if not hostname:
             return None
 
-        # 1. Try a direct, exact match first (e.g., 'www.royalroad.com')
         parser = repo_parsers_collection.find_one({"domains": hostname})
         if parser:
             logger.info(f"Found direct parser match for {hostname}: {parser['filename']}")
             return parser
 
-        # 2. If no exact match, try matching parent domains.
-        #    (e.g., if hostname is 'sub.domain.com', it will check 'domain.com')
         parts = hostname.split('.')
         if len(parts) > 1:
             for i in range(1, len(parts)):
