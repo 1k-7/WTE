@@ -2,7 +2,7 @@ import logging
 import os
 import asyncio
 import re
-from telegram import Update, ReplyKeyboardRemove
+from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
     CallbackContext, CallbackQueryHandler, ConversationHandler
@@ -37,8 +37,8 @@ async def start(update: Update, context: CallbackContext) -> None:
     start_message = (
         'Welcome to the WebToEpub Bot!\n\n'
         '**Instructions:**\n'
-        '1. After deploying, run `/parserjson` ONCE to set up your parsers. This will take a long time.\n'
-        '2. Once finished, the bot is ready to use.\n\n'
+        '1. If this is a new deployment, run `/parserjson` ONCE to set up your parsers. This will take a long time.\n'
+        '2. Once finished, the bot will restart and be ready to use.\n\n'
         '**Available Commands:**\n'
         '/epub <url> - Convert a page.\n'
         '/settings - Configure options.\n'
@@ -52,11 +52,10 @@ async def settings_command(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
     reply_markup, message = await get_main_settings_menu(user_id)
     await update.message.reply_text(message, reply_markup=reply_markup)
-    
+
 async def generate_manifest_command(update: Update, context: CallbackContext) -> None:
     """Triggers the generation of the parsers.json manifest file."""
     sent_message = await update.message.reply_text("Starting `parsers.json` generation... This will take a very long time and the bot will be unresponsive.")
-    # Run the generation in the background
     asyncio.create_task(generate_parsers_manifest(sent_message))
 
 
