@@ -47,32 +47,29 @@ async ([parserScript, url, ...dependencyScripts]) => {
 
 async def update_parsers_from_github(sent_message):
     """
-    Runs as a background task, providing progress updates by editing the message.
-    Crucially, runs blocking I/O (git) in a separate thread to prevent hanging.
+    Runs as a background task, processing parsers in batches to prevent hangs
+    and providing real-time progress updates.
     """
     try:
-        # --- THIS IS THE FIX FOR THE HANGING ---
-        # Run the blocking git operations in a separate thread.
+        # --- NON-BLOCKING GIT OPERATIONS ---
         def git_operations():
             if os.path.exists(REPO_DIR):
                 logger.info("Git repo exists. Pulling latest changes...")
                 repo = git.Repo(REPO_DIR)
                 origin = repo.remotes.origin
                 origin.pull()
-                logger.info("Pulled latest changes from WebToEpub repository.")
             else:
                 logger.info("Git repo does not exist. Cloning...")
                 git.Repo.clone_from(REPO_URL, REPO_DIR)
-                logger.info("Cloned WebToEpub repository.")
         
         await sent_message.edit_text("Updating parsers... (Accessing repository)")
         await asyncio.to_thread(git_operations)
-        await sent_message.edit_text("Updating parsers... (Repository updated, preparing to scan files)")
+        await sent_message.edit_text("Updating parsers... (Repository updated)")
 
         js_dir = os.path.join(REPO_DIR, "plugin", "js")
         parsers_dir = os.path.join(js_dir, "parsers")
         if not os.path.isdir(parsers_dir):
-            raise FileNotFoundError("Parsers directory not found after git operation.")
+            raise FileNotFoundError("Parsers directory not found.")
             
         dependency_files = ["Util.js", "Parser.js", "ParserFactory.js"]
         dependency_scripts = {}
@@ -82,59 +79,60 @@ async def update_parsers_from_github(sent_message):
 
         parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js') and f != "Template.js"]
         parsers_to_save = []
+        total_files = len(parser_files)
         
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
+        # --- BATCH PROCESSING LOGIC ---
+        BATCH_SIZE = 50 
+        for i in range(0, total_files, BATCH_SIZE):
+            batch = parser_files[i:i + BATCH_SIZE]
+            logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(total_files + BATCH_SIZE - 1)//BATCH_SIZE}")
             
-            total_files = len(parser_files)
-            await sent_message.edit_text(f"Updating parsers... (Starting scan of {total_files} files)")
-            
-            for i, filename in enumerate(parser_files):
-                if (i + 1) % 20 == 0: # Update every 20 files to avoid rate limits
-                    try:
-                        await sent_message.edit_text(f"Updating parsers... Scanned {i+1}/{total_files} files.")
-                        await asyncio.sleep(0.5)
-                    except Exception as e:
-                        logger.warning(f"Could not edit progress message: {e}")
-
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
                 page = await browser.new_page()
-                try:
-                    with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
-                        parser_script = f.read()
-                    
-                    html_content = f"""
-                    <!DOCTYPE html><html><body>
-                        <script>{dependency_scripts["Util.js"]}</script>
-                        <script>{dependency_scripts["Parser.js"]}</script>
-                        <script>{dependency_scripts["ParserFactory.js"]}</script>
-                        <script>
-                            let registeredDomains = [];
-                            parserFactory.register = (domains, parser) => {{
-                                if (typeof domains === 'string') {{ registeredDomains.push(domains); }}
-                                else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }}
-                            }};
-                        </script>
-                        <script>{parser_script}</script>
-                    </body></html>
-                    """
-                    
-                    data_url = f"data:text/html,{quote(html_content)}"
-                    await page.goto(data_url, timeout=15000)
-                    domains = await page.evaluate("() => window.registeredDomains")
 
-                    if isinstance(domains, list) and domains:
-                        parsers_to_save.append({ "filename": filename, "domains": domains, "script": parser_script })
-                except Exception as e:
-                    logger.error(f"Failed to process {filename}: {e}", exc_info=True)
-                finally:
-                    await page.close()
-            
-            await browser.close()
+                for filename in batch:
+                    current_index = i + batch.index(filename)
+                    try:
+                        await sent_message.edit_text(f"Updating parsers... Scanned {current_index + 1}/{total_files} files.")
+                        
+                        with open(os.path.join(parsers_dir, filename), 'r', encoding='utf-8') as f:
+                            parser_script = f.read()
+                        
+                        html_content = f"""
+                        <!DOCTYPE html><html><body>
+                            <script>{dependency_scripts["Util.js"]}</script>
+                            <script>{dependency_scripts["Parser.js"]}</script>
+                            <script>{dependency_scripts["ParserFactory.js"]}</script>
+                            <script>
+                                let registeredDomains = [];
+                                parserFactory.register = (domains, parser) => {{
+                                    if (typeof domains === 'string') {{ registeredDomains.push(domains); }}
+                                    else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }}
+                                }};
+                            </script>
+                            <script>{parser_script}</script>
+                        </body></html>
+                        """
+                        
+                        data_url = f"data:text/html,{quote(html_content)}"
+                        # Aggressive timeout for each file
+                        await page.goto(data_url, timeout=10000, wait_until='domcontentloaded')
+                        domains = await page.evaluate("() => window.registeredDomains")
+
+                        if isinstance(domains, list) and domains:
+                            parsers_to_save.append({ "filename": filename, "domains": domains, "script": parser_script })
+                    except Exception as e:
+                        logger.error(f"Failed to process {filename}: {e}", exc_info=False) # Keep logs clean
+                
+                # Cleanly close browser after each batch
+                await browser.close()
+            await asyncio.sleep(1) # Small pause between batches
 
         if parsers_to_save:
             save_parsers_from_repo(parsers_to_save)
             count = len(parsers_to_save)
-            await sent_message.edit_text(f"✅ Parser update complete. Successfully saved {count} parsers.")
+            await sent_message.edit_text(f"✅ Parser update complete. Successfully saved {count}/{total_files} parsers.")
         else:
             await sent_message.edit_text("ℹ️ Parser update finished, but no parsers were successfully scanned. Check logs for errors.")
             
