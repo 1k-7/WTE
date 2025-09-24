@@ -11,6 +11,11 @@ STORAGE_DIR=/opt/render/project/.render
 echo "...Installing pip requirements"
 pip install -r requirements.txt
 
+# --- ADD THIS LINE ---
+# Clone the WebToEpub repository to ensure dependency files are always present on startup
+echo "...Cloning WebToEpub repository"
+git clone https://github.com/dteviot/WebToEpub.git webtoepub_repo
+
 # Check if Chrome is already installed in the cache
 if [[ ! -d $STORAGE_DIR/chrome ]]; then
   echo "...Downloading and installing Google Chrome"
