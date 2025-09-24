@@ -42,7 +42,7 @@ async ([parserScript, url, ...dependencyScripts]) => {
 }
 """
 
-async def update_parsers_from_github(sent_message):
+async def update_parsers_from_github(sent_message, limit=None):
     total_saved_count = 0
     try:
         def git_operations():
@@ -74,6 +74,8 @@ async def update_parsers_from_github(sent_message):
                     dependency_scripts[file] = f.read()
 
         parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js') and f != "Template.js"]
+        if limit:
+            parser_files = parser_files[:limit]
         total_files = len(parser_files)
         
         BATCH_SIZE = 50 
