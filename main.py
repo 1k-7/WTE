@@ -14,7 +14,7 @@ from settings import (
     SETTING_VALUE, handle_setting_value_input, get_main_settings_menu
 )
 from parser import get_chapter_list, create_epub_from_chapters, update_parsers_from_github
-from database import add_custom_parser
+from database import add_custom_parser, clean_repo_parsers
 
 # --- Enable logging ---
 logging.basicConfig(
@@ -43,13 +43,10 @@ async def start(update: Update, context: CallbackContext) -> None:
     """Send a welcome message with updated instructions."""
     await update.message.reply_text(
         'Welcome to the WebToEpub Bot!\n\n'
-        'To convert a webpage, use the /epub command:\n\n'
-        '1. **Single Link:** `/epub https://your-link.com`\n'
-        '2. **Reply to Links:** Send a message with one or more links, then reply to it with `/epub`.\n'
-        '3. **Reply to File:** Upload a `.txt` or `.json` file with links, then reply to it with `/epub`.\n\n'
-        'The bot will fetch the chapter list and let you select which ones to include.\n\n'
+        'To convert a webpage, use the /epub command.\n'
         'Use /settings to configure options.\n'
         'Use /update_parsers to fetch the latest parsers.\n'
+        'Use /cleanparsers to clear the parser database before updating.\n'
         'Use /add_parser to add a custom parser.'
     )
 
@@ -66,8 +63,19 @@ async def update_parsers_command(update: Update, context: CallbackContext) -> No
         count = await update_parsers_from_github()
         await update.message.reply_text(f"Successfully updated {count} parsers.")
     except Exception as e:
-        logger.error(f"Error updating parsers: {e}")
-        await update.message.reply_text("An error occurred while updating parsers.")
+        logger.error(f"Error updating parsers: {e}", exc_info=True)
+        await update.message.reply_text(f"An error occurred while updating parsers: {e}")
+
+# --- THIS IS THE NEW COMMAND HANDLER ---
+async def clean_parsers_command(update: Update, context: CallbackContext) -> None:
+    """Clears the repository parsers from the database."""
+    await update.message.reply_text("Cleaning parser database...")
+    try:
+        deleted_count = clean_repo_parsers()
+        await update.message.reply_text(f"Successfully deleted {deleted_count} parsers from the database. You can now run /update_parser to get a fresh copy.")
+    except Exception as e:
+        logger.error(f"Error cleaning parsers: {e}", exc_info=True)
+        await update.message.reply_text("An error occurred while cleaning the parser database.")
 
 async def add_parser_start(update: Update, context: CallbackContext) -> int:
     """Start the custom parser upload process."""
@@ -216,13 +224,12 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
     url = ""
     replied_message = update.message.reply_to_message
 
-    # Extract a single URL from command arguments or a replied message
     if context.args:
         url = context.args[0]
-    elif replied_message:
-        urls = filters.Entity("url").extract_from(replied_message)
+    elif replied_message and replied_message.text:
+        urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', replied_message.text)
         if urls:
-            url = list(urls)[0]  # Process only the first URL for chapter selection
+            url = urls[0]
         else:
             await update.message.reply_text("The replied message doesn't contain a valid URL.")
             return ConversationHandler.END
@@ -242,14 +249,12 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
         context.user_data['chapters'] = chapters
         context.user_data['title'] = title
         context.user_data['page'] = 0
-
-        # If it's a single page/chapter, just process it directly
-        if len(chapters) == 1:
+        
+        if len(chapters) == 1 and not parser_found:
             await update.message.reply_text("Single chapter/page detected. Processing directly...")
             await process_chapters_to_epub(update, context, chapters)
             return ConversationHandler.END
         
-        # If no specific parser was found, ask the user
         if not parser_found:
             keyboard = [[
                 InlineKeyboardButton("Yes, proceed", callback_data="default_parser_yes"),
@@ -262,7 +267,6 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
             )
             return CHAPTER_SELECTION
         
-        # If parser was found and there are multiple chapters, show selection
         await display_chapter_selection(update, context, f"Found {len(chapters)} chapters for '{title}'. Please select which to include:")
         return CHAPTER_SELECTION
 
@@ -300,7 +304,7 @@ def main() -> None:
             ]
         },
         fallbacks=[CommandHandler('cancel', cancel)],
-        conversation_timeout=600 # 10 minutes
+        conversation_timeout=600
     )
 
     add_parser_handler = ConversationHandler(
@@ -322,6 +326,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("update_parsers", update_parsers_command))
+    application.add_handler(CommandHandler("cleanparsers", clean_parsers_command)) # Add the new command
     application.add_handler(add_parser_handler)
     application.add_handler(epub_conversation_handler)
     application.add_handler(CallbackQueryHandler(handle_settings_callback, pattern='^(toggle_|goto_|back_to_)'))
