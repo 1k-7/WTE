@@ -37,8 +37,7 @@ async def start(update: Update, context: CallbackContext) -> None:
     start_message = (
         'Welcome to the WebToEpub Bot!\n\n'
         '**Instructions:**\n'
-        '1. If this is a new deployment, run `/parserjson` ONCE to set up your parsers. This will take a long time.\n'
-        '2. Once finished, the bot will restart and be ready to use.\n\n'
+        'If you ever add new parsers, run `/parserjson` ONCE to update your setup. This will take a long time.\n\n'
         '**Available Commands:**\n'
         '/epub <url> - Convert a page.\n'
         '/settings - Configure options.\n'
