@@ -66,7 +66,7 @@ async def update_parsers_from_github(sent_message, limit=None):
         dependency_scripts = {}
         for file in dependency_files:
             base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
-            filepath = os.path.join(base_dir, file)
+            filepath = os.path.normpath(os.path.join(base_dir, file))
             with open(filepath, 'r', encoding='utf-8') as f:
                 if file.endswith('.json'):
                     dependency_scripts[file] = f'const messages = {f.read()};'
@@ -161,7 +161,7 @@ async def get_chapter_list(url: str, user_id: int):
                 ]
                 for file in dependency_files:
                     base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
-                    filepath = os.path.join(base_dir, file)
+                    filepath = os.path.normpath(os.path.join(base_dir, file))
                     with open(filepath, 'r', encoding='utf-8') as f:
                         if file.endswith('.json'):
                             dependency_scripts.append(f'const messages = {f.read()};')
@@ -213,7 +213,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
         ]
         for file in dependency_files:
             base_dir = os.path.join(REPO_DIR, "unitTest") if "polyfillChrome" in file else js_dir
-            filepath = os.path.join(base_dir, file)
+            filepath = os.path.normpath(os.path.join(base_dir, file))
             with open(filepath, 'r', encoding='utf-8') as f:
                 if file.endswith('.json'):
                     dependency_scripts.append(f'const messages = {f.read()};')
