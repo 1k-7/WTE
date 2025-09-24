@@ -9,6 +9,7 @@ from urllib.parse import urljoin, quote
 import logging
 import json
 
+# Enhanced logging to capture every detail
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s',
     level=logging.INFO
@@ -16,9 +17,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
-REPO_DIR = "webtoepub_lib" 
+REPO_DIR = "webtoepub_lib"
 
-def _load_dependency_scripts(as_dict=False):
+def _load_dependency_scripts():
     js_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js"))
     plugin_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin"))
     unittest_dir = os.path.abspath(os.path.join(REPO_DIR, "unitTest"))
@@ -30,74 +31,124 @@ def _load_dependency_scripts(as_dict=False):
         "ParserFactory.js": js_dir, "UserPreferences.js": js_dir, "Util.js": js_dir,
     }
 
-    scripts = {} if as_dict else []
+    scripts = []
     for file, base_dir in dependency_map.items():
         filepath = os.path.join(base_dir, file)
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
                 script_content = f'const messages = {content};' if file.endswith('.json') else content
-                if as_dict:
-                    scripts[file] = script_content
-                else:
-                    scripts.append(script_content)
+                scripts.append(script_content)
         except FileNotFoundError:
             logger.error(f"FATAL: A required library file was not found: {filepath}")
-            return {} if as_dict else []
+            return []
     return scripts
 
-async def load_local_parsers_to_db():
+async def generate_parsers_manifest(sent_message):
     """
-    Loads all local parser files from the webtoepub_lib/plugin/js/parsers directory
-    into the MongoDB database. This runs on startup.
+    Scans local parser files, extracts their domains using Playwright,
+    and writes the result to parsers.json.
     """
-    logger.info("Starting local parser loading process...")
+    await sent_message.edit_text("Starting parser scan... This is a one-time process and will take several minutes.")
+    
     parsers_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js", "parsers"))
+    manifest_path = 'parsers.json'
     
     if not os.path.isdir(parsers_dir):
-        logger.error(f"Parsers directory not found at {parsers_dir}. Cannot load parsers.")
+        await sent_message.edit_text(f"❌ ERROR: Parsers directory not found at {parsers_dir}.")
         return
 
-    dependency_scripts = _load_dependency_scripts(as_dict=True)
-    if not dependency_scripts:
-        logger.error("Could not load base dependency scripts. Aborting parser load.")
+    dependency_scripts_list = _load_dependency_scripts()
+    if not dependency_scripts_list:
+        await sent_message.edit_text("❌ ERROR: Could not load base dependency scripts. Aborting.")
         return
         
-    parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js')]
+    parser_files = [f for f in os.listdir(parsers_dir) if f.endswith('.js') and f != 'Template.js']
     total_files = len(parser_files)
-    logger.info(f"Found {total_files} local parser files to process.")
-
-    batch_to_save = []
+    logger.info(f"Found {total_files} local parser files to process for manifest.")
+    
+    manifest_data = {}
+    processed_count = 0
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox'])
         page = await browser.new_page()
 
         for filename in parser_files:
+            processed_count += 1
+            if processed_count % 10 == 0:
+                await sent_message.edit_text(f"Scanning parsers... ({processed_count}/{total_files})")
+            
             try:
                 filepath = os.path.join(parsers_dir, filename)
                 with open(filepath, 'r', encoding='utf-8') as f:
                     parser_script = f.read()
 
-                script_tags = "".join([f"<script>{s}</script>" for s in dependency_scripts.values()])
+                # Use data URL method to isolate script execution
+                script_tags = "".join([f"<script>{s}</script>" for s in dependency_scripts_list])
                 html_content = f"<!DOCTYPE html><html><body>{script_tags}<script>var registeredDomains = []; parserFactory.register = (domains, parser) => {{ if (typeof domains === 'string') {{ registeredDomains.push(domains); }} else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }} }};</script><script>{parser_script}</script></body></html>"
                 data_url = f"data:text/html,{quote(html_content)}"
                 await page.goto(data_url, timeout=15000, wait_until='domcontentloaded')
                 domains = await page.evaluate("() => window.registeredDomains")
 
                 if isinstance(domains, list) and domains:
-                    batch_to_save.append({ "filename": filename, "domains": domains, "script": parser_script })
+                    manifest_data[filename] = domains
+                    logger.info(f"Extracted domains for {filename}: {domains}")
+                else:
+                    logger.warning(f"No domains found for {filename}")
+
             except Exception as e:
-                logger.error(f"Failed to process local parser {filename}: {e}", exc_info=False)
+                logger.error(f"Failed to process local parser {filename} for manifest: {e}", exc_info=False)
         
         await browser.close()
     
-    if batch_to_save:
-        clean_all_parsers()
-        saved_count = save_parsers_from_repo(batch_to_save)
-        logger.info(f"✅ Successfully loaded {saved_count}/{len(batch_to_save)} parsers into the database.")
+    if manifest_data:
+        try:
+            with open(manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(manifest_data, f, indent=2)
+            await sent_message.edit_text(f"✅ Success! `parsers.json` has been generated with {len(manifest_data)} entries. Please restart the bot now.")
+            # Also trigger the DB load
+            await load_parsers_from_manifest()
+        except Exception as e:
+            await sent_message.edit_text(f"❌ ERROR: Could not write to `{manifest_path}`. Reason: {e}")
     else:
-        logger.warning("No parsers were successfully processed and loaded.")
+        await sent_message.edit_text("⚠️ Warning: No parsers were successfully processed. `parsers.json` was not created.")
 
+async def load_parsers_from_manifest():
+    logger.info("Starting parser load from manifest...")
+    manifest_path = 'parsers.json'
+    parsers_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js", "parsers"))
+    
+    try:
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            manifest = json.load(f)
+    except FileNotFoundError:
+        logger.error(f"FATAL: `parsers.json` not found. Run /parserjson to create it.")
+        return
+    except json.JSONDecodeError:
+        logger.error(f"FATAL: `parsers.json` is not valid JSON. Run /parserjson to recreate it.")
+        return
+    
+    parsers_to_save = []
+    for filename, domains in manifest.items():
+        filepath = os.path.join(parsers_dir, filename)
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                script_content = f.read()
+            parsers_to_save.append({
+                "filename": filename,
+                "domains": domains,
+                "script": script_content
+            })
+        except FileNotFoundError:
+            logger.error(f"Parser file '{filename}' from manifest not found at '{filepath}'.")
+
+    if parsers_to_save:
+        clean_all_parsers()
+        saved_count = save_parsers_from_repo(parsers_to_save)
+        logger.info(f"✅ Successfully loaded {saved_count}/{len(parsers_to_save)} parsers from manifest into the database.")
+    else:
+        logger.warning("No parsers were loaded from the manifest. The database may be empty.")
 
 async def run_parser_in_browser(page, parser_script, task_type):
     dependency_scripts = _load_dependency_scripts()
@@ -158,7 +209,6 @@ async def run_parser_in_browser(page, parser_script, task_type):
 
     return await asyncio.wait_for(future, timeout=30.0)
 
-
 async def get_chapter_list(url: str, user_id: int):
     logger.info(f"Starting chapter list fetch for URL: {url}")
     if not os.path.exists(CHROME_EXECUTABLE_PATH):
@@ -207,7 +257,6 @@ async def get_chapter_list(url: str, user_id: int):
             chapters = [{'title': "Full Page Content", 'url': url, 'selected': True}]
         logger.info(f"Generic scraping found {len(chapters)} potential chapters.")
         return title, chapters, False
-
 
 async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
     final_filename = re.sub(r'[\\/*?:"<>|]', "", title)
