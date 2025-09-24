@@ -38,7 +38,6 @@ def save_parsers_from_repo(parsers_data):
     if not parsers_data:
         return 0
     
-    # Use update_one with upsert to prevent duplicates if a parser is re-scanned
     from pymongo import UpdateOne
     operations = [
         UpdateOne({'filename': p['filename']}, {'$set': p}, upsert=True)
@@ -51,7 +50,6 @@ def get_parser_count():
     """Returns the number of parsers loaded from the repository."""
     return repo_parsers_collection.count_documents({})
 
-# --- THIS IS THE NEW COMMAND YOU REQUESTED ---
 def clean_repo_parsers():
     """Deletes all parsers from the repository collection."""
     result = repo_parsers_collection.delete_many({})
@@ -81,7 +79,6 @@ def get_repo_parser(url):
 
         parser = repo_parsers_collection.find_one({"domains": hostname})
         if parser:
-            logger.info(f"Found direct parser match for {hostname}: {parser['filename']}")
             return parser
 
         parts = hostname.split('.')
@@ -90,7 +87,6 @@ def get_repo_parser(url):
                 parent_domain = '.'.join(parts[i:])
                 parser = repo_parsers_collection.find_one({"domains": parent_domain})
                 if parser:
-                    logger.info(f"Found parent domain parser match for {parent_domain}: {parser['filename']}")
                     return parser
     except Exception as e:
         logger.error(f"Error finding repo parser for {url}: {e}")
