@@ -5,3 +5,4 @@ ebooklib
 pymongo
 GitPython
 python-dotenv
+httpx
