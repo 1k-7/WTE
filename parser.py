@@ -296,7 +296,7 @@ async def get_chapter_list(url: str, user_id: int, context: CallbackContext):
         browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
         page = await browser.new_page()
         try:
-            await page.goto(url, wait_until='networkidle', timeout=60000)
+            await page.goto(url, wait_until='domcontentloaded', timeout=60000)
         except Exception as e:
             await browser.close()
             raise IOError(f"Failed to navigate to URL: {e}")
@@ -347,7 +347,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
             if not chapter_data.get('selected', False): continue
             page = await browser.new_page()
             try:
-                await page.goto(chapter_data['url'], wait_until='networkidle', timeout=60000)
+                await page.goto(chapter_data['url'], wait_until='domcontentloaded', timeout=60000)
                 repo_parser = get_repo_parser(chapter_data['url'])
                 chapter_html_content = ''
                 if repo_parser:
