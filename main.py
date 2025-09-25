@@ -12,7 +12,7 @@ from settings import (
     get_user_settings, handle_settings_callback,
     SETTING_VALUE, handle_setting_value_input, get_main_settings_menu
 )
-from parser import get_chapter_list, create_epub_from_chapters, load_parsers_from_manifest, generate_parsers_manifest
+from parser import get_chapter_list, create_epub_from_chapters, generate_parsers_manifest, ensure_parsers_are_loaded
 from database import add_custom_parser
 
 # --- Enable logging ---
@@ -37,7 +37,7 @@ async def start(update: Update, context: CallbackContext) -> None:
     start_message = (
         'Welcome to the WebToEpub Bot!\n\n'
         '**Instructions:**\n'
-        'If you ever add new parsers, run `/parserjson` ONCE to update your setup. This will take a long time.\n\n'
+        'If you ever add new parser files, run `/parserjson` ONCE to update your setup. This will take a long time.\n\n'
         '**Available Commands:**\n'
         '/epub <url> - Convert a page.\n'
         '/settings - Configure options.\n'
@@ -174,18 +174,25 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
     if not url:
         await update.message.reply_text("Usage: /epub <URL> or reply to a message with a link.")
         return ConversationHandler.END
+    
     await update.message.reply_text(f"Fetching chapters from: {url}")
     try:
+        # Ensure parsers are loaded before proceeding
+        await ensure_parsers_are_loaded()
+        
         title, chapters, parser_found = await get_chapter_list(url, update.effective_user.id)
         if not chapters: raise ValueError("No chapters found.")
         context.user_data.update({'chapters': chapters, 'title': title, 'page': 0})
+        
         if len(chapters) == 1 and not parser_found:
             await process_chapters_to_epub(update, context, chapters)
             return ConversationHandler.END
+        
         if not parser_found:
             keyboard = [[InlineKeyboardButton("Yes", callback_data="dp_yes"), InlineKeyboardButton("No", callback_data="dp_no")]]
             await update.message.reply_text("No specific parser found. Proceed with generic conversion?", reply_markup=InlineKeyboardMarkup(keyboard))
             return CHAPTER_SELECTION
+        
         await display_chapter_selection(update, context, f"Found {len(chapters)} chapters for '{title}'.")
         return CHAPTER_SELECTION
     except Exception as e:
@@ -205,19 +212,13 @@ async def handle_default_parser_choice(update: Update, context: CallbackContext)
         return ConversationHandler.END
 
 # --- Main Application Setup ---
-async def on_startup(application: Application):
-    """Loads local parsers from the manifest file into the database."""
-    logger.info("Application starting up, loading parsers from manifest...")
-    asyncio.create_task(load_parsers_from_manifest())
-
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.post_init = on_startup
 
     # Command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("settings", settings_command))
-    application.add_handler(CommandHandler("parserjson", generate_manifest_command)) # New Command
+    application.add_handler(CommandHandler("parserjson", generate_manifest_command))
     
     # Conversation handlers
     application.add_handler(ConversationHandler(
