@@ -5,9 +5,10 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 from database import get_custom_parser, get_repo_parser, save_parsers_from_repo, clean_all_parsers, get_parser_count
-from urllib.parse import urljoin, quote
+from urllib.parse import urljoin, quote, urlparse
 import logging
 import json
+from telegram.ext import CallbackContext
 
 # Enhanced logging to capture every detail
 logging.basicConfig(
@@ -21,6 +22,16 @@ REPO_DIR = "webtoepub_lib"
 
 # A global flag to ensure we only check the DB once per session
 PARSERS_LOADED = False
+
+async def log_to_channel(context: CallbackContext, message: str):
+    """Sends a log message to the configured log channel."""
+    from database import get_log_channel
+    log_channel_id = get_log_channel()
+    if log_channel_id:
+        try:
+            await context.bot.send_message(chat_id=log_channel_id, text=message)
+        except Exception as e:
+            logger.error(f"Failed to send log to channel {log_channel_id}: {e}")
 
 def _load_dependency_scripts():
     js_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js"))
@@ -87,6 +98,7 @@ async def generate_parsers_manifest(sent_message):
                 with open(filepath, 'r', encoding='utf-8') as f:
                     parser_script = f.read()
 
+                # Use data URL method to isolate script execution
                 script_tags = "".join([f"<script>{s}</script>" for s in dependency_scripts_list])
                 html_content = f"<!DOCTYPE html><html><body>{script_tags}<script>var registeredDomains = []; parserFactory.register = (domains, parser) => {{ if (typeof domains === 'string') {{ registeredDomains.push(domains); }} else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }} }};</script><script>{parser_script}</script></body></html>"
                 data_url = f"data:text/html,{quote(html_content)}"
@@ -156,21 +168,22 @@ async def load_parsers_from_manifest():
     else:
         logger.warning("No parsers were loaded from the manifest. The database may be empty.")
 
-async def ensure_parsers_are_loaded():
+async def ensure_parsers_are_loaded(context: CallbackContext):
     """
     Checks if parsers are loaded in the DB. If not, loads them from the manifest.
     This is called before the /epub command runs.
     """
     global PARSERS_LOADED
     if not PARSERS_LOADED:
+        await log_to_channel(context, "Checking parser database...")
         count = get_parser_count()
         if count == 0:
-            logger.info("Parser database is empty. Loading from manifest for the first time this session.")
+            await log_to_channel(context, "Parser database is empty. Loading from manifest for the first time this session.")
             await load_parsers_from_manifest()
         else:
-            logger.info(f"{count} parsers already in database. Skipping load.")
+            await log_to_channel(context, f"{count} parsers already in database. Skipping load.")
             PARSERS_LOADED = True
-
+            
 async def load_parsers_from_json_content(json_content, sent_message):
     """
     Loads parsers from a JSON string into the database.
@@ -270,11 +283,13 @@ async def run_parser_in_browser(page, parser_script, task_type):
 
     return await asyncio.wait_for(future, timeout=30.0)
 
-async def get_chapter_list(url: str, user_id: int):
+async def get_chapter_list(url: str, user_id: int, context: CallbackContext):
     logger.info(f"Starting chapter list fetch for URL: {url}")
     if not os.path.exists(CHROME_EXECUTABLE_PATH):
         raise FileNotFoundError(f"FATAL: Chrome executable not found at {CHROME_EXECUTABLE_PATH}")
     
+    hostname = urlparse(url).hostname
+    await log_to_channel(context, f"Searching for parser for domain: `{hostname}`")
     repo_parser = get_repo_parser(url)
     
     async with async_playwright() as p:
@@ -287,15 +302,14 @@ async def get_chapter_list(url: str, user_id: int):
             raise IOError(f"Failed to navigate to URL: {e}")
 
         if repo_parser:
-            logger.info(f"Found specific parser: {repo_parser['filename']}")
+            await log_to_channel(context, f"Found parser: `{repo_parser['filename']}`. Attempting to extract chapters...")
             try:
                 result = await run_parser_in_browser(page, repo_parser['script'], 'getChapters')
-                logger.info(f"Parser execution result: {result}")
                 
                 if result and 'error' not in result and result.get('type') == 'chapters' and result.get('chapters'):
                     await browser.close()
-                    logger.info(f"Successfully parsed {len(result['chapters'])} chapters for title: '{result['title']}'")
                     chapters = result['chapters']
+                    await log_to_channel(context, f"Successfully parsed {len(chapters)} chapters for title: '{result['title']}'")
                     for chapter in chapters:
                         chapter['url'] = urljoin(url, chapter['url'])
                         chapter['selected'] = True
@@ -303,11 +317,13 @@ async def get_chapter_list(url: str, user_id: int):
                 else:
                     error_details = result.get('error', 'Unknown error') if result else 'No result object returned'
                     logger.error(f"Parser '{repo_parser['filename']}' failed. Reason: {error_details}")
+                    await log_to_channel(context, f"Parser `{repo_parser['filename']}` failed. Reason: `{error_details}`")
 
             except Exception as e:
                 logger.error(f"A Python-level exception occurred while running the parser: {e}", exc_info=True)
+                await log_to_channel(context, f"A critical error occurred while running the parser: {e}")
 
-        logger.warning("Parser failed or not found. Falling back to generic scraping.")
+        await log_to_channel(context, "Parser failed or not found. Falling back to generic scraping.")
         html_content = await page.content()
         await browser.close()
         soup = BeautifulSoup(html_content, 'html.parser')
@@ -316,7 +332,7 @@ async def get_chapter_list(url: str, user_id: int):
         chapters = [{'title': link.text.strip(), 'url': urljoin(url, link['href']), 'selected': True} for link in links if link.text.strip() and re.search(r'chapter|ep\d+|ch\.\d+', link.text.lower(), re.I)]
         if not chapters:
             chapters = [{'title': "Full Page Content", 'url': url, 'selected': True}]
-        logger.info(f"Generic scraping found {len(chapters)} potential chapters.")
+        await log_to_channel(context, f"Generic scraping found {len(chapters)} potential chapters.")
         return title, chapters, False
 
 async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
