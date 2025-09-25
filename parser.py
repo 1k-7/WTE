@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
 REPO_DIR = "webtoepub_lib" 
 
-# A global flag to ensure we only load parsers once per session
+# A global flag to ensure we only check the DB once per session
 PARSERS_LOADED = False
 
 def _load_dependency_scripts():
@@ -87,7 +87,6 @@ async def generate_parsers_manifest(sent_message):
                 with open(filepath, 'r', encoding='utf-8') as f:
                     parser_script = f.read()
 
-                # Use data URL method to isolate script execution
                 script_tags = "".join([f"<script>{s}</script>" for s in dependency_scripts_list])
                 html_content = f"<!DOCTYPE html><html><body>{script_tags}<script>var registeredDomains = []; parserFactory.register = (domains, parser) => {{ if (typeof domains === 'string') {{ registeredDomains.push(domains); }} else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }} }};</script><script>{parser_script}</script></body></html>"
                 data_url = f"data:text/html,{quote(html_content)}"
@@ -109,13 +108,17 @@ async def generate_parsers_manifest(sent_message):
         try:
             with open(manifest_path, 'w', encoding='utf-8') as f:
                 json.dump(manifest_data, f, indent=2)
-            await sent_message.edit_text(f"✅ Success! `parsers.json` has been generated with {len(manifest_data)} entries. Please restart the bot now.")
+            await sent_message.edit_text(f"✅ Success! `parsers.json` has been generated with {len(manifest_data)} entries. You can now use the bot.")
         except Exception as e:
             await sent_message.edit_text(f"❌ ERROR: Could not write to `{manifest_path}`. Reason: {e}")
     else:
         await sent_message.edit_text("⚠️ Warning: No parsers were successfully processed. `parsers.json` was not created.")
 
 async def load_parsers_from_manifest():
+    """
+    Loads parsers from the local parsers.json file into the database.
+    This version is designed to fail loudly if there's a problem.
+    """
     global PARSERS_LOADED
     logger.info("Starting parser load from manifest...")
     manifest_path = 'parsers.json'
@@ -167,6 +170,46 @@ async def ensure_parsers_are_loaded():
         else:
             logger.info(f"{count} parsers already in database. Skipping load.")
             PARSERS_LOADED = True
+
+async def load_parsers_from_json_content(json_content, sent_message):
+    """
+    Loads parsers from a JSON string into the database.
+    """
+    global PARSERS_LOADED
+    logger.info("Loading parsers from provided JSON content...")
+    parsers_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js", "parsers"))
+    
+    try:
+        manifest = json.loads(json_content)
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON provided: {e}")
+        await sent_message.edit_text("❌ ERROR: The provided file is not valid JSON.")
+        return
+
+    parsers_to_save = []
+    for filename, domains in manifest.items():
+        filepath = os.path.join(parsers_dir, filename)
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                script_content = f.read()
+            parsers_to_save.append({
+                "filename": filename,
+                "domains": domains,
+                "script": script_content
+            })
+        except FileNotFoundError:
+            logger.error(f"Parser file '{filename}' from manifest not found at '{filepath}'.")
+
+    if parsers_to_save:
+        clean_all_parsers()
+        saved_count = save_parsers_from_repo(parsers_to_save)
+        logger.info(f"✅ Successfully loaded {saved_count}/{len(parsers_to_save)} parsers into the database.")
+        await sent_message.edit_text(f"✅ Success! Loaded {saved_count} parsers into the database.")
+        PARSERS_LOADED = True
+    else:
+        logger.warning("No parsers were successfully loaded from the provided JSON.")
+        await sent_message.edit_text("⚠️ Warning: No parsers were loaded. Please check the file content.")
+
 
 async def run_parser_in_browser(page, parser_script, task_type):
     dependency_scripts = _load_dependency_scripts()
