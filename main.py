@@ -2,6 +2,7 @@ import logging
 import os
 import asyncio
 import re
+import json
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
@@ -12,7 +13,7 @@ from settings import (
     get_user_settings, handle_settings_callback,
     SETTING_VALUE, handle_setting_value_input, get_main_settings_menu
 )
-from parser import get_chapter_list, create_epub_from_chapters, generate_parsers_manifest, ensure_parsers_are_loaded
+from parser import get_chapter_list, create_epub_from_chapters, load_parsers_from_json_content, ensure_parsers_are_loaded, generate_parsers_manifest
 from database import add_custom_parser, clean_database, set_log_channel, get_log_channel
 
 # --- Enable logging ---
@@ -27,7 +28,7 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 PORT = int(os.environ.get('PORT', 8080))
 
 # --- Conversation states ---
-TARGET_URL, PARSER_FILE = range(2)
+TARGET_URL, PARSER_FILE, LOAD_PARSER_FILE = range(3)
 CHAPTER_SELECTION = 0
 
 # --- Helper Functions ---
@@ -49,13 +50,14 @@ async def start(update: Update, context: CallbackContext) -> None:
         '**Instructions:**\n'
         '1. If you have a logs channel, make the bot an admin and use `/logc` to set it.\n'
         '2. Use `/cleandb` to ensure a fresh start.\n'
-        '3. The bot will automatically load parsers from `parsers.json` on the first `/epub` command.\n\n'
+        '3. Use the `/loadparsers` command and reply with your `parsers.json` file to set up the bot.\n\n'
         '**Available Commands:**\n'
         '/epub <url> - Convert a page.\n'
         '/settings - Configure options.\n'
         '/add_parser - Add a custom parser.\n'
         '/cleandb - (Admin) Wipes the entire database.\n'
         '/logc - (Admin) Sets the channel for detailed logs.\n'
+        '/loadparsers - (Admin) Load parsers into the database from a `parsers.json` file.\n'
         '/parserjson - (Admin) Generate the `parsers.json` file from your local parsers.'
     )
     await update.message.reply_text(start_message)
@@ -100,6 +102,31 @@ async def generate_manifest_command(update: Update, context: CallbackContext) ->
     sent_message = await update.message.reply_text("Starting `parsers.json` generation... This will take a very long time and the bot will be unresponsive.")
     await log_to_channel(context, "Parser manifest generation started.")
     asyncio.create_task(generate_parsers_manifest(sent_message))
+
+async def load_parsers_start(update: Update, context: CallbackContext) -> int:
+    """Starts the process of loading parsers from a JSON file."""
+    await update.message.reply_text("Please reply to this message with your `parsers.json` file.")
+    return LOAD_PARSER_FILE
+
+async def received_parsers_file(update: Update, context: CallbackContext) -> int:
+    """Receives the parsers.json file and loads it into the database."""
+    if not update.message.document or not update.message.document.file_name.endswith('.json'):
+        await update.message.reply_text("That's not a .json file. Please upload a valid `parsers.json` file.")
+        return LOAD_PARSER_FILE
+
+    try:
+        file = await context.bot.get_file(update.message.document.file_id)
+        parsers_content = (await file.download_as_bytearray()).decode('utf-8')
+        
+        sent_message = await update.message.reply_text("Processing `parsers.json` and loading into the database... This may take a moment.")
+        
+        asyncio.create_task(load_parsers_from_json_content(parsers_content, sent_message))
+        
+    except Exception as e:
+        logger.error(f"Failed to load parsers file: {e}")
+        await update.message.reply_text("There was an error processing your file.")
+        
+    return ConversationHandler.END
 
 
 async def add_parser_start(update: Update, context: CallbackContext) -> int:
