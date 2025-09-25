@@ -1,136 +1,120 @@
-import pymongo
-import os
+from pymongo import MongoClient
 from urllib.parse import urlparse
 import logging
+import os
 
+# --- Constants ---
+MONGO_URI = os.environ.get('MONGO_URI')
+DB_NAME = "wte-bot-db"
+
+# --- Database Client ---
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+
+# --- Collections ---
+user_settings = db["user_settings"]
+custom_parsers = db["custom_parsers"]
+repo_parsers = db["repo_parsers"] 
+log_channel = db["log_channel"]
+
+# --- Logging ---
 logger = logging.getLogger(__name__)
 
-# --- Database Connection ---
-MONGODB_URI = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/')
-client = pymongo.MongoClient(MONGODB_URI)
-db = client['webtoepub_bot']
-user_settings_collection = db['user_settings']
-repo_parsers_collection = db['repo_parsers']
-custom_parsers_collection = db['custom_parsers']
-bot_settings_collection = db['bot_settings'] # New collection for bot-wide settings
+# --- Parser Management ---
 
-repo_parsers_collection.create_index([("domains", pymongo.ASCENDING)])
-custom_parsers_collection.create_index([("user_id", pymongo.ASCENDING), ("target_url", pymongo.ASCENDING)])
-
-# --- Bot Settings ---
-def set_log_channel(channel_id):
-    """Saves the log channel ID."""
-    bot_settings_collection.update_one(
-        {'_id': 'bot_config'},
-        {'$set': {'log_channel_id': channel_id}},
-        upsert=True
-    )
-
-def get_log_channel():
-    """Retrieves the log channel ID."""
-    config = bot_settings_collection.find_one({'_id': 'bot_config'})
-    return config.get('log_channel_id') if config else None
-
-def clean_database():
-    """Deletes all documents from all collections."""
-    logger.warning("Cleaning all collections from the database...")
-    collections = [user_settings_collection, repo_parsers_collection, custom_parsers_collection, bot_settings_collection]
-    deleted_counts = {}
-    for collection in collections:
-        result = collection.delete_many({})
-        deleted_counts[collection.name] = result.deleted_count
-    return deleted_counts
-
-# --- User Settings Functions ---
-def get_user_settings(user_id):
-    """Retrieves settings for a given user from MongoDB."""
-    return user_settings_collection.find_one({'user_id': user_id})
-
-def set_user_setting(user_id, key, value):
-    """Updates a specific setting for a user in MongoDB."""
-    user_settings_collection.update_one(
-        {'user_id': user_id},
-        {'$set': {key: value}},
-        upsert=True
-    )
-
-# --- Parser Functions ---
-def save_parsers_from_repo(parsers_data):
-    """
-    Saves a list of parsers to the database incrementally.
-    """
-    if not parsers_data:
-        return 0
-    
-    from pymongo import UpdateOne
-    operations = [
-        UpdateOne({'filename': p['filename']}, {'$set': p}, upsert=True)
-        for p in parsers_data
-    ]
-    result = repo_parsers_collection.bulk_write(operations)
-    return result.upserted_count + result.modified_count
-    
 def get_parser_count():
-    """Returns the number of parsers loaded from the repository."""
-    return repo_parsers_collection.count_documents({})
+    """Returns the number of parsers in the database."""
+    return repo_parsers.count_documents({})
 
-def clean_all_parsers():
-    """Deletes all parsers from the repository collection."""
-    logger.info("Deleting all existing parsers from the database...")
-    result = repo_parsers_collection.delete_many({})
-    return result.deleted_count
-
-def add_custom_parser(user_id, target_url, script_content):
-    """Adds or updates a custom parser for a user."""
-    custom_parsers_collection.update_one(
-        {'user_id': user_id, 'target_url': target_url},
-        {'$set': {'script': script_content}},
-        upsert=True
-    )
-
-def get_custom_parser(user_id, url):
-    """Finds a custom parser for a given URL and user."""
-    return custom_parsers_collection.find_one({'user_id': user_id, 'target_url': url})
-
-def get_repo_parser(url):
+def get_repo_parser(url: str):
     """
-    Finds the correct parser by matching the URL's domain against the
-    'domains' array stored in the database.
+    Finds a parser from the repository collection that matches the given URL's domain.
+    Handles 'www.' subdomains for more reliable matching.
     """
     try:
         hostname = urlparse(url).hostname
         if not hostname:
             return None
-        
-        hostname = hostname.lower()
-        
-        # 1. Exact match
-        parser = repo_parsers_collection.find_one({"domains": hostname})
-        if parser:
-            return parser
             
-        # 2. Match without "www."
-        if hostname.startswith("www."):
-            parser = repo_parsers_collection.find_one({"domains": hostname[4:]})
-            if parser:
-                return parser
-
-        # 3. Match with "www."
-        else:
-            parser = repo_parsers_collection.find_one({"domains": f"www.{hostname}"})
-            if parser:
-                return parser
-
-        # 4. Check for parent domain matches.
-        parts = hostname.split('.')
-        if len(parts) > 2:
-            for i in range(1, len(parts) - 1):
-                parent_domain = '.'.join(parts[i:])
-                parser = repo_parsers_collection.find_one({"domains": parent_domain})
-                if parser:
-                    return parser
+        # Create a list of possible domains to check (e.g., 'www.example.com' and 'example.com')
+        domains_to_check = [hostname]
+        if hostname.startswith('www.'):
+            domains_to_check.append(hostname[4:])
+            
+        # Query for a parser where its 'domains' array contains any of our possible domains.
+        parser = repo_parsers.find_one({"domains": {"$in": domains_to_check}})
         
+        if parser:
+            logger.info(f"Found repo parser for {hostname}: {parser.get('filename')}")
+        else:
+            logger.info(f"No repo parser found for any of: {domains_to_check}")
+            
+        return parser
     except Exception as e:
-        logger.error(f"Error finding repo parser for {url}: {e}", exc_info=True)
+        logger.error(f"Error fetching repo parser for {url}: {e}", exc_info=True)
+        return None
+
+def add_custom_parser(user_id: int, url: str, script_content: str):
+    """Adds or updates a custom parser for a user."""
+    hostname = urlparse(url).hostname
+    if not hostname:
+        raise ValueError("Invalid URL provided.")
     
-    return None
+    custom_parsers.update_one(
+        {"user_id": user_id, "hostname": hostname},
+        {"$set": {"script": script_content}},
+        upsert=True
+    )
+    logger.info(f"Upserted custom parser for user {user_id} and host {hostname}")
+
+def get_custom_parser(user_id: int, url: str):
+    """Retrieves a user's custom parser for a given URL."""
+    hostname = urlparse(url).hostname
+    if not hostname:
+        return None
+    return custom_parsers.find_one({"user_id": user_id, "hostname": hostname})
+
+def save_parsers_from_repo(parsers_list: list):
+    """Saves a list of parsers to the repo_parsers collection."""
+    if not parsers_list:
+        return 0
+    try:
+        # Using insert_many for bulk operation
+        result = repo_parsers.insert_many(parsers_list, ordered=False)
+        return len(result.inserted_ids)
+    except Exception as e:
+        logger.error(f"Error during bulk save of repo parsers: {e}", exc_info=True)
+        return 0
+
+def clean_all_parsers():
+    """Removes all documents from the repo_parsers collection."""
+    try:
+        result = repo_parsers.delete_many({})
+        logger.info(f"Cleaned {result.deleted_count} parsers from the repository collection.")
+        return result.deleted_count
+    except Exception as e:
+        logger.error(f"Error cleaning repo parsers: {e}", exc_info=True)
+        return 0
+
+# --- General Database Functions ---
+
+def clean_database():
+    """Wipes all collections in the database."""
+    deleted_counts = {}
+    for collection in [user_settings, custom_parsers, repo_parsers, log_channel]:
+        count = collection.delete_many({}).deleted_count
+        deleted_counts[collection.name] = count
+    return deleted_counts
+
+def set_log_channel(channel_id: str):
+    """Sets or updates the log channel ID."""
+    log_channel.update_one(
+        {"_id": "log_channel_config"},
+        {"$set": {"channel_id": channel_id}},
+        upsert=True
+    )
+
+def get_log_channel():
+    """Retrieves the configured log channel ID."""
+    config = log_channel.find_one({"_id": "log_channel_config"})
+    return config.get("channel_id") if config else None
