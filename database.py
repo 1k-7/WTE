@@ -20,6 +20,27 @@ log_channel = db["log_channel"]
 # --- Logging ---
 logger = logging.getLogger(__name__)
 
+# --- Settings Management (FIXED) ---
+
+def get_user_settings(user_id: int) -> dict:
+    """
+    Retrieves a user's settings document from the database.
+    Returns an empty dict if no settings are found.
+    """
+    settings = user_settings.find_one({"user_id": user_id})
+    return settings if settings else {}
+
+def set_user_setting(user_id: int, key: str, value):
+    """
+    Sets a specific setting for a user in the database.
+    Creates the user's settings document if it doesn't exist.
+    """
+    user_settings.update_one(
+        {"user_id": user_id},
+        {"$set": {key: value}},
+        upsert=True
+    )
+
 # --- Parser Management ---
 
 def get_parser_count():
