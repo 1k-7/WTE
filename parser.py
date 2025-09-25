@@ -4,11 +4,12 @@ import re
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from database import get_custom_parser, get_repo_parser, save_parsers_from_repo, clean_all_parsers
+from database import get_custom_parser, get_repo_parser, save_parsers_from_repo, clean_all_parsers, get_parser_count
 from urllib.parse import urljoin, quote
 import logging
 import json
 
+# Enhanced logging to capture every detail
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s - %(message)s',
     level=logging.INFO
@@ -17,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 CHROME_EXECUTABLE_PATH = "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome"
 REPO_DIR = "webtoepub_lib" 
+
+# A global flag to ensure we only load parsers once per session
+PARSERS_LOADED = False
 
 def _load_dependency_scripts():
     js_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js"))
@@ -106,14 +110,13 @@ async def generate_parsers_manifest(sent_message):
             with open(manifest_path, 'w', encoding='utf-8') as f:
                 json.dump(manifest_data, f, indent=2)
             await sent_message.edit_text(f"✅ Success! `parsers.json` has been generated with {len(manifest_data)} entries. Please restart the bot now.")
-            # Also trigger the DB load
-            await load_parsers_from_manifest()
         except Exception as e:
             await sent_message.edit_text(f"❌ ERROR: Could not write to `{manifest_path}`. Reason: {e}")
     else:
         await sent_message.edit_text("⚠️ Warning: No parsers were successfully processed. `parsers.json` was not created.")
 
 async def load_parsers_from_manifest():
+    global PARSERS_LOADED
     logger.info("Starting parser load from manifest...")
     manifest_path = 'parsers.json'
     parsers_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js", "parsers"))
@@ -146,8 +149,24 @@ async def load_parsers_from_manifest():
         clean_all_parsers()
         saved_count = save_parsers_from_repo(parsers_to_save)
         logger.info(f"✅ Successfully loaded {saved_count}/{len(parsers_to_save)} parsers from manifest into the database.")
+        PARSERS_LOADED = True
     else:
         logger.warning("No parsers were loaded from the manifest. The database may be empty.")
+
+async def ensure_parsers_are_loaded():
+    """
+    Checks if parsers are loaded in the DB. If not, loads them from the manifest.
+    This is called before the /epub command runs.
+    """
+    global PARSERS_LOADED
+    if not PARSERS_LOADED:
+        count = get_parser_count()
+        if count == 0:
+            logger.info("Parser database is empty. Loading from manifest for the first time this session.")
+            await load_parsers_from_manifest()
+        else:
+            logger.info(f"{count} parsers already in database. Skipping load.")
+            PARSERS_LOADED = True
 
 async def run_parser_in_browser(page, parser_script, task_type):
     dependency_scripts = _load_dependency_scripts()
