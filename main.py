@@ -243,6 +243,9 @@ async def process_chapters_to_epub(update: Update, context: CallbackContext, cha
         await log_to_channel(context, f"Error creating EPUB for '{title}': {e}")
 
 async def epub_command(update: Update, context: CallbackContext) -> int:
+    # This function now ensures parsers are loaded if they haven't been already.
+    await ensure_parsers_are_loaded(context)
+    
     url = ""
     if context.args: url = context.args[0]
     elif update.message.reply_to_message and update.message.reply_to_message.text:
@@ -256,9 +259,6 @@ async def epub_command(update: Update, context: CallbackContext) -> int:
     await log_to_channel(context, f"Received /epub command for: {url}")
     
     try:
-        # This function now ensures parsers are loaded if they haven't been already.
-        await ensure_parsers_are_loaded(context)
-        
         title, chapters, parser_found = await get_chapter_list(url, update.effective_user.id, context)
         if not chapters: raise ValueError("No chapters found.")
         context.user_data.update({'chapters': chapters, 'title': title, 'page': 0})
@@ -331,3 +331,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
