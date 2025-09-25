@@ -34,7 +34,7 @@ CHAPTER_SELECTION = 0
 # --- Helper Functions ---
 async def log_to_channel(context: CallbackContext, message: str):
     """Sends a log message to the configured log channel."""
-    log_channel_id = get_log_channel()
+    log_channel_id = await asyncio.to_thread(get_log_channel)
     if log_channel_id:
         try:
             await context.bot.send_message(chat_id=log_channel_id, text=message)
@@ -66,7 +66,7 @@ async def clean_db_command(update: Update, context: CallbackContext) -> None:
     """Clears the entire database."""
     await update.message.reply_text("Cleaning all collections from the database...")
     try:
-        deleted_counts = clean_database()
+        deleted_counts = await asyncio.to_thread(clean_database)
         response_message = "Successfully cleaned the database.\n"
         for collection_name, count in deleted_counts.items():
             response_message += f"- Deleted {count} documents from `{collection_name}`\n"
@@ -84,7 +84,7 @@ async def set_log_channel_command(update: Update, context: CallbackContext) -> N
     
     try:
         channel_id = context.args[0]
-        set_log_channel(channel_id)
+        await asyncio.to_thread(set_log_channel, channel_id)
         await update.message.reply_text(f"Log channel has been set to: {channel_id}")
         await log_to_channel(context, f"Log channel was set by user {update.effective_user.id}.")
     except Exception as e:
@@ -150,7 +150,7 @@ async def received_parser_file(update: Update, context: CallbackContext) -> int:
     try:
         file = await context.bot.get_file(update.message.document.file_id)
         parser_content = (await file.download_as_bytearray()).decode('utf-8')
-        add_custom_parser(user_id, target_url, parser_content)
+        await asyncio.to_thread(add_custom_parser, user_id, target_url, parser_content)
         await update.message.reply_text(f"Custom parser for {target_url} has been added successfully!")
     except Exception as e:
         logger.error(f"Failed to add custom parser: {e}")
@@ -209,7 +209,7 @@ async def chapter_selection_callback(update: Update, context: CallbackContext):
         context.user_data['page'] = int(data)
     elif action == 'select':
         for chapter in chapters: chapter['selected'] = (data == 'all')
-    await display_chapter_selection(update, context, f"Select chapters for: {context.user_data['title']}")
+    
     if action == 'done':
         await query.edit_message_text("Processing selected chapters...")
         selected_chapters = [ch for ch in chapters if ch.get('selected', True)]
@@ -218,6 +218,9 @@ async def chapter_selection_callback(update: Update, context: CallbackContext):
             return ConversationHandler.END
         await process_chapters_to_epub(update, context, selected_chapters)
         return ConversationHandler.END
+    else:
+        await display_chapter_selection(update, context, f"Select chapters for: {context.user_data['title']}")
+
 
 async def process_chapters_to_epub(update: Update, context: CallbackContext, chapters: list):
     chat_id = update.effective_chat.id
@@ -227,7 +230,7 @@ async def process_chapters_to_epub(update: Update, context: CallbackContext, cha
     await log_to_channel(context, message)
     
     try:
-        user_settings = get_user_settings(update.effective_user.id)
+        user_settings = await asyncio.to_thread(get_user_settings, update.effective_user.id)
         epub_path, final_filename = await create_epub_from_chapters(chapters, title, user_settings)
         if epub_path and os.path.exists(epub_path):
             with open(epub_path, 'rb') as epub_file:
@@ -243,9 +246,13 @@ async def process_chapters_to_epub(update: Update, context: CallbackContext, cha
         await log_to_channel(context, f"Error creating EPUB for '{title}': {e}")
 
 async def epub_command(update: Update, context: CallbackContext) -> int:
-    # This function now ensures parsers are loaded if they haven't been already.
-    await ensure_parsers_are_loaded(context)
-    
+    try:
+        await ensure_parsers_are_loaded(context)
+    except Exception as e:
+        logger.error(f"Failed to load parsers: {e}", exc_info=True)
+        await update.message.reply_text(f"Could not load parsers. Error: {e}")
+        return ConversationHandler.END
+        
     url = ""
     if context.args: url = context.args[0]
     elif update.message.reply_to_message and update.message.reply_to_message.text:
@@ -331,4 +338,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
