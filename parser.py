@@ -183,7 +183,7 @@ async def ensure_parsers_are_loaded(context: CallbackContext):
         else:
             await log_to_channel(context, f"{count} parsers already in database. Skipping load.")
             PARSERS_LOADED = True
-            
+
 async def load_parsers_from_json_content(json_content, sent_message):
     """
     Loads parsers from a JSON string into the database.
