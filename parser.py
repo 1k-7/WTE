@@ -26,7 +26,7 @@ PARSERS_LOADED = False
 async def log_to_channel(context: CallbackContext, message: str):
     """Sends a log message to the configured log channel."""
     from database import get_log_channel
-    log_channel_id = get_log_channel()
+    log_channel_id = await asyncio.to_thread(get_log_channel)
     if log_channel_id:
         try:
             await context.bot.send_message(chat_id=log_channel_id, text=message)
@@ -98,7 +98,6 @@ async def generate_parsers_manifest(sent_message):
                 with open(filepath, 'r', encoding='utf-8') as f:
                     parser_script = f.read()
 
-                # Use data URL method to isolate script execution
                 script_tags = "".join([f"<script>{s}</script>" for s in dependency_scripts_list])
                 html_content = f"<!DOCTYPE html><html><body>{script_tags}<script>var registeredDomains = []; parserFactory.register = (domains, parser) => {{ if (typeof domains === 'string') {{ registeredDomains.push(domains); }} else if (Array.isArray(domains)) {{ registeredDomains.push(...domains); }} }};</script><script>{parser_script}</script></body></html>"
                 data_url = f"data:text/html,{quote(html_content)}"
@@ -127,56 +126,49 @@ async def generate_parsers_manifest(sent_message):
         await sent_message.edit_text("⚠️ Warning: No parsers were successfully processed. `parsers.json` was not created.")
 
 async def load_parsers_from_manifest():
-    """
-    Loads parsers from the local parsers.json file into the database.
-    This version is designed to fail loudly if there's a problem.
-    """
     global PARSERS_LOADED
     logger.info("Starting parser load from manifest...")
-    manifest_path = 'parsers.json'
-    parsers_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js", "parsers"))
     
-    try:
+    def _sync_read_manifest_files():
+        manifest_path = 'parsers.json'
+        parsers_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js", "parsers"))
+        
         with open(manifest_path, 'r', encoding='utf-8') as f:
             manifest = json.load(f)
-    except FileNotFoundError:
-        logger.error(f"FATAL: `parsers.json` not found. Run /parserjson to create it.")
-        raise
-    except json.JSONDecodeError as e:
-        logger.error(f"FATAL: `parsers.json` is not valid JSON. Please fix or recreate it. Error: {e}")
-        raise
-    
-    parsers_to_save = []
-    for filename, domains in manifest.items():
-        filepath = os.path.join(parsers_dir, filename)
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                script_content = f.read()
-            parsers_to_save.append({
-                "filename": filename,
-                "domains": domains,
-                "script": script_content
-            })
-        except FileNotFoundError:
-            logger.error(f"Parser file '{filename}' from manifest not found at '{filepath}'.")
+        
+        parsers_to_save = []
+        for filename, domains in manifest.items():
+            filepath = os.path.join(parsers_dir, filename)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    script_content = f.read()
+                parsers_to_save.append({
+                    "filename": filename,
+                    "domains": domains,
+                    "script": script_content
+                })
+            except FileNotFoundError:
+                logger.error(f"Parser file '{filename}' from manifest not found at '{filepath}'.")
+        return parsers_to_save
 
-    if parsers_to_save:
-        clean_all_parsers()
-        saved_count = save_parsers_from_repo(parsers_to_save)
-        logger.info(f"✅ Successfully loaded {saved_count}/{len(parsers_to_save)} parsers from manifest into the database.")
-        PARSERS_LOADED = True
-    else:
-        logger.warning("No parsers were loaded from the manifest. The database may be empty.")
+    try:
+        parsers_to_save = await asyncio.to_thread(_sync_read_manifest_files)
+        if parsers_to_save:
+            await asyncio.to_thread(clean_all_parsers)
+            saved_count = await asyncio.to_thread(save_parsers_from_repo, parsers_to_save)
+            logger.info(f"✅ Successfully loaded {saved_count}/{len(parsers_to_save)} parsers from manifest into the database.")
+            PARSERS_LOADED = True
+        else:
+            logger.warning("No parsers were loaded from the manifest. The database may be empty.")
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        logger.error(f"FATAL: Could not load from parsers.json. Please create it with /parserjson. Error: {e}")
+        raise
 
 async def ensure_parsers_are_loaded(context: CallbackContext):
-    """
-    Checks if parsers are loaded in the DB. If not, loads them from the manifest.
-    This is called before the /epub command runs.
-    """
     global PARSERS_LOADED
     if not PARSERS_LOADED:
         await log_to_channel(context, "Checking parser database...")
-        count = get_parser_count()
+        count = await asyncio.to_thread(get_parser_count)
         if count == 0:
             await log_to_channel(context, "Parser database is empty. Loading from manifest for the first time this session.")
             await load_parsers_from_manifest()
@@ -185,44 +177,42 @@ async def ensure_parsers_are_loaded(context: CallbackContext):
             PARSERS_LOADED = True
 
 async def load_parsers_from_json_content(json_content, sent_message):
-    """
-    Loads parsers from a JSON string into the database.
-    """
     global PARSERS_LOADED
     logger.info("Loading parsers from provided JSON content...")
-    parsers_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js", "parsers"))
-    
+
+    def _sync_prepare_parsers(content):
+        parsers_dir = os.path.abspath(os.path.join(REPO_DIR, "plugin", "js", "parsers"))
+        manifest = json.loads(content)
+        parsers_to_save = []
+        for filename, domains in manifest.items():
+            filepath = os.path.join(parsers_dir, filename)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    script_content = f.read()
+                parsers_to_save.append({
+                    "filename": filename,
+                    "domains": domains,
+                    "script": script_content
+                })
+            except FileNotFoundError:
+                logger.error(f"Parser file '{filename}' from manifest not found at '{filepath}'.")
+        return parsers_to_save
+
     try:
-        manifest = json.loads(json_content)
+        parsers_to_save = await asyncio.to_thread(_sync_prepare_parsers, json_content)
+        if parsers_to_save:
+            await asyncio.to_thread(clean_all_parsers)
+            saved_count = await asyncio.to_thread(save_parsers_from_repo, parsers_to_save)
+            logger.info(f"✅ Successfully loaded {saved_count}/{len(parsers_to_save)} parsers into the database.")
+            await sent_message.edit_text(f"✅ Success! Loaded {saved_count} parsers into the database.")
+            PARSERS_LOADED = True
+        else:
+            logger.warning("No parsers were successfully loaded from the provided JSON.")
+            await sent_message.edit_text("⚠️ Warning: No parsers were loaded. Please check the file content.")
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON provided: {e}")
         await sent_message.edit_text("❌ ERROR: The provided file is not valid JSON.")
         return
-
-    parsers_to_save = []
-    for filename, domains in manifest.items():
-        filepath = os.path.join(parsers_dir, filename)
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                script_content = f.read()
-            parsers_to_save.append({
-                "filename": filename,
-                "domains": domains,
-                "script": script_content
-            })
-        except FileNotFoundError:
-            logger.error(f"Parser file '{filename}' from manifest not found at '{filepath}'.")
-
-    if parsers_to_save:
-        clean_all_parsers()
-        saved_count = save_parsers_from_repo(parsers_to_save)
-        logger.info(f"✅ Successfully loaded {saved_count}/{len(parsers_to_save)} parsers into the database.")
-        await sent_message.edit_text(f"✅ Success! Loaded {saved_count} parsers into the database.")
-        PARSERS_LOADED = True
-    else:
-        logger.warning("No parsers were successfully loaded from the provided JSON.")
-        await sent_message.edit_text("⚠️ Warning: No parsers were loaded. Please check the file content.")
-
 
 async def run_parser_in_browser(page, parser_script, task_type):
     dependency_scripts = _load_dependency_scripts()
@@ -290,7 +280,7 @@ async def get_chapter_list(url: str, user_id: int, context: CallbackContext):
     
     hostname = urlparse(url).hostname
     await log_to_channel(context, f"Searching for parser for domain: `{hostname}`")
-    repo_parser = get_repo_parser(url)
+    repo_parser = await asyncio.to_thread(get_repo_parser, url)
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(executable_path=CHROME_EXECUTABLE_PATH, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
@@ -348,7 +338,7 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
             page = await browser.new_page()
             try:
                 await page.goto(chapter_data['url'], wait_until='domcontentloaded', timeout=60000)
-                repo_parser = get_repo_parser(chapter_data['url'])
+                repo_parser = await asyncio.to_thread(get_repo_parser, chapter_data['url'])
                 chapter_html_content = ''
                 if repo_parser:
                     try:
@@ -375,9 +365,12 @@ async def create_epub_from_chapters(chapters: list, title: str, settings: dict):
             finally:
                 await page.close()
         await browser.close()
+    
     book.spine = book_spine
     book.toc = [(epub.Link(c.file_name, c.title, f"chap_{i+1}")) for i, c in enumerate(book.items) if isinstance(c, epub.EpubHtml)]
     book.add_item(epub.EpubNcx()); book.add_item(epub.EpubNav())
     epub_path = f"{final_filename}.epub"
-    epub.write_epub(epub_path, book, {})
+    
+    await asyncio.to_thread(epub.write_epub, epub_path, book, {})
+    
     return epub_path, final_filename
