@@ -12,12 +12,36 @@ db = client['webtoepub_bot']
 user_settings_collection = db['user_settings']
 repo_parsers_collection = db['repo_parsers']
 custom_parsers_collection = db['custom_parsers']
+bot_settings_collection = db['bot_settings'] # New collection for bot-wide settings
 
 repo_parsers_collection.create_index([("domains", pymongo.ASCENDING)])
 custom_parsers_collection.create_index([("user_id", pymongo.ASCENDING), ("target_url", pymongo.ASCENDING)])
 
+# --- Bot Settings ---
+def set_log_channel(channel_id):
+    """Saves the log channel ID."""
+    bot_settings_collection.update_one(
+        {'_id': 'bot_config'},
+        {'$set': {'log_channel_id': channel_id}},
+        upsert=True
+    )
 
-# --- Settings Functions ---
+def get_log_channel():
+    """Retrieves the log channel ID."""
+    config = bot_settings_collection.find_one({'_id': 'bot_config'})
+    return config.get('log_channel_id') if config else None
+
+def clean_database():
+    """Deletes all documents from all collections."""
+    logger.warning("Cleaning all collections from the database...")
+    collections = [user_settings_collection, repo_parsers_collection, custom_parsers_collection, bot_settings_collection]
+    deleted_counts = {}
+    for collection in collections:
+        result = collection.delete_many({})
+        deleted_counts[collection.name] = result.deleted_count
+    return deleted_counts
+
+# --- User Settings Functions ---
 def get_user_settings(user_id):
     """Retrieves settings for a given user from MongoDB."""
     return user_settings_collection.find_one({'user_id': user_id})
